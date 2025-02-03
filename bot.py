@@ -11,6 +11,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.presences = True  # もしpresence情報が不要ならFalseにする
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Bot本体の準備
 bot = commands.Bot(
