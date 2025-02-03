@@ -1,39 +1,60 @@
 import os
 import csv
+import json
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-CSV_FILE_NAME = "output.csv"
+# =============== SETTINGS ===============
+CSV_FILE_NAME = "output.csv"             # CSVファイル名
+CONFIG_FILE_NAME = "guild_config.json"    # JSON保存ファイル
+# ========================================
 
-# ---------------------------------
-# 有効UIDを保持するセット
-# ---------------------------------
+# 有効UID (文字列型で保持)
 valid_uids = set()
 
-# ---------------------------------
-# ギルド(サーバー)ごとに「チャンネルID」「ロールID」を保持する簡易的な辞書
-# 形式: guild_config[guild_id] = {"channel_id": 1234567890, "role_id": 1111111111}
-# ---------------------------------
+# ギルドごとの設定を保持する辞書
+# 形式: {
+#   guild_id (str): {
+#       "channel_id": int,
+#       "channel_name": str,
+#       "role_id": int,
+#       "role_name": str,
+#       "message_id": int
+#   },
+#   ...
+# }
 guild_config = {}
 
-# Intentsの設定
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.presences = True  # 不要なら False
-bot = commands.Bot(command_prefix="!", intents=intents)
+# ---------------------------
+# JSON 読み込み/書き込み
+# ---------------------------
+def load_guild_config():
+    global guild_config
+    if os.path.exists(CONFIG_FILE_NAME):
+        with open(CONFIG_FILE_NAME, "r", encoding="utf-8") as f:
+            guild_config = json.load(f)
+    else:
+        guild_config = {}
 
-# =========================
-# CSVの読み込み関数
-# =========================
+def save_guild_config():
+    with open(CONFIG_FILE_NAME, "w", encoding="utf-8") as f:
+        json.dump(guild_config, f, ensure_ascii=False, indent=2)
+
+# ---------------------------
+# CSV読み込み
+# ---------------------------
 def load_csv():
+    """
+    Returns: 読み込んだUIDの数
+    """
     global valid_uids
     new_valid_uids = set()
+    
     try:
         with open(CSV_FILE_NAME, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -42,142 +63,184 @@ def load_csv():
                 if uid:
                     new_valid_uids.add(uid)
     except FileNotFoundError:
-        print(f"CSVファイル {CSV_FILE_NAME} が見つかりませんでした。")
+        print(f"CSV file '{CSV_FILE_NAME}' not found. Creating an empty set.")
     
     valid_uids = new_valid_uids
-    print(f"CSVを読み込みました。有効UID数: {len(valid_uids)}")
+    return len(valid_uids)
 
-# =========================
-# Bot起動時処理
-# =========================
+# ---------------------------
+# Discord Bot Setup
+# ---------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True  # Required for add_roles
+intents.presences = False  # Usually not needed unless you specifically need presence info
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ---------------------------
+# 起動時
+# ---------------------------
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
-    # 起動時にCSV読み込み
-    load_csv()
 
+    # JSON & CSV のロード
+    load_guild_config()
+    loaded_count = load_csv()
+    print(f"CSV reloaded. {loaded_count} UIDs loaded.")
+
+    # スラッシュコマンド同期
     try:
         await bot.tree.sync()
         print("Slash commands synced.")
     except Exception as e:
         print(e)
 
-    # 定期タスク(毎日1回)を開始する例
-    reload_csv_daily.start()
-
-# =========================
-# 24時間おきにCSVを再読み込みするタスク
-# =========================
-@tasks.loop(hours=24)
-async def reload_csv_daily():
-    load_csv()
-    print("定期実行: CSV再読み込み完了")
-
-# =========================
+# ============================
 # /setup command
-# =========================
-@bot.tree.command(name="setup", description="ロール付与ボタン設置用コマンド")
-@app_commands.default_permissions(administrator=True)  # 管理者権限がある人だけ使える
+# ============================
+@bot.tree.command(name="setup", description="Set up the role and button for eligibility checking.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    channel="ボタンを設置するチャンネル",
-    role="eligible時に付与するロール"
+    channel="Select the channel to send the button message",
+    role="Select the role to be granted if eligible"
 )
-async def setup_command(interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role):
+async def setup_command(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    role: discord.Role
+):
     """
-    例: /setup channel:#ボット用チャンネル role:@付与したいロール
+    Usage Example:
+    /setup channel:#general role:@MyRole
     """
-    # サーバー(ギルド)単位で、選択されたチャンネルIDとロールIDを記憶
-    guild_id = interaction.guild_id
-    guild_config[guild_id] = {
-        "channel_id": channel.id,
-        "role_id": role.id
-    }
+    guild_id_str = str(interaction.guild_id)
+    
+    # 既存のメッセージがあれば削除 or 編集
+    old_message_id = None
+    if guild_id_str in guild_config:
+        old_message_id = guild_config[guild_id_str].get("message_id")
 
-    # Embedメッセージ
+    # もし古いメッセージがある場合、削除して新しいチャンネルに投稿する(編集で同じチャンネルに貼り直すのも可)
+    if old_message_id is not None:
+        # 古いメッセージを削除(存在する＆Botが削除権限を持っている場合)
+        try:
+            old_channel_id = guild_config[guild_id_str]["channel_id"]
+            old_channel = interaction.guild.get_channel(old_channel_id)
+            if old_channel:
+                old_message = await old_channel.fetch_message(old_message_id)
+                await old_message.delete()
+        except Exception as e:
+            print(f"Failed to delete old message: {e}")
+
+    # 新しいメッセージを作成
     embed = discord.Embed(
-        title="Botの説明",
+        title="Check Eligibility",
         description=(
-            "このボタンを押すとCSVのUIDと照合し、該当すればロール付与します。\n"
-            "該当しない場合は 'You are not eligible' を表示します。"
+            "Click the button below to check if you are eligible.\n"
+            "If eligible, you will be granted the specified role."
         ),
         color=discord.Color.blue()
     )
-    # ボタンのViewを作成(ロール情報を渡せるように、ViewのコンストラクタにロールIDを渡す)
-    view = CheckEligibilityView(role_id=role.id)
+    view = CheckEligibilityView()
 
-    # 選択されたチャンネルに送信
-    await channel.send(embed=embed, view=view)
+    # 送信
+    msg = await channel.send(embed=embed, view=view)
+
+    # ギルド設定を保存
+    guild_config[guild_id_str] = {
+        "channel_id": channel.id,
+        "channel_name": channel.name,
+        "role_id": role.id,
+        "role_name": role.name,
+        "message_id": msg.id
+    }
+    save_guild_config()
 
     await interaction.response.send_message(
-        f"{channel.mention} にボタンを設置しました。付与ロール: {role.mention}",
+        f"Setup completed in {channel.mention} with role: {role.mention}.",
         ephemeral=True
     )
 
-# =========================
-# /reloadcsv コマンド (管理者用)
-# =========================
-@bot.tree.command(name="reloadcsv", description="CSVを手動で再読み込みします")
+# ============================
+# /relodelist command
+# ============================
+@bot.tree.command(name="relodelist", description="Reload the CSV list manually.")
 @app_commands.default_permissions(administrator=True)
-async def reload_csv_command(interaction: discord.Interaction):
-    load_csv()
+async def relodelist_command(interaction: discord.Interaction):
+    """
+    Reloads the CSV file and tells how many UIDs were loaded.
+    """
+    loaded_count = load_csv()
     await interaction.response.send_message(
-        "CSVを再読み込みしました。",
+        f"CSV reloaded successfully. **{loaded_count}** UIDs loaded.",
         ephemeral=True
     )
 
-# =========================
-# ボタンが配置されたView
-# =========================
+# ============================
+# ボタンView
+# ============================
 class CheckEligibilityView(discord.ui.View):
-    """ロールIDなどを保持したままボタンを作るView"""
-    def __init__(self, role_id: int):
-        super().__init__(timeout=None)  # timeout=Noneで、Bot再起動まで押せるようにする
-        self.add_item(CheckEligibilityButton(role_id))
+    def __init__(self):
+        # timeout=Noneで再起動まで押せる (ただし再起動すると無効になる)
+        super().__init__(timeout=None)
+        self.add_item(CheckEligibilityButton())
 
-# =========================
-# ボタンのクラス
-# =========================
+# ============================
+# ボタン本体
+# ============================
 class CheckEligibilityButton(discord.ui.Button):
-    def __init__(self, role_id: int):
+    def __init__(self):
         super().__init__(
             label="Check Eligibility",
             style=discord.ButtonStyle.primary
         )
-        self.role_id = role_id  # 付与対象ロールのID
 
     async def callback(self, interaction: discord.Interaction):
         user_id_str = str(interaction.user.id)
+        guild_id_str = str(interaction.guild_id)
+
+        # Check if user is in CSV list
         if user_id_str in valid_uids:
-            # eligible の場合
-            # ロール付与 (Botに権限がないと失敗するので注意)
-            guild = interaction.guild
-            role = guild.get_role(self.role_id)
-            if role:
-                try:
-                    await interaction.user.add_roles(role)
+            # Eligible -> Grant role
+            if guild_id_str in guild_config:
+                # 取得
+                role_id = guild_config[guild_id_str]["role_id"]
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    try:
+                        await interaction.user.add_roles(role)
+                        await interaction.response.send_message(
+                            f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!",
+                            ephemeral=True
+                        )
+                    except discord.Forbidden:
+                        # Botがロール付与できる権限を持っていないケース
+                        await interaction.response.send_message(
+                            "Bot does not have permission to add that role.",
+                            ephemeral=True
+                        )
+                else:
                     await interaction.response.send_message(
-                        f"You are eligible (UID: {user_id_str}). Role {role.mention} has been added!",
-                        ephemeral=True
-                    )
-                except discord.Forbidden:
-                    await interaction.response.send_message(
-                        "権限不足でロールを付与できませんでした。",
+                        "The configured role no longer exists on this server.",
                         ephemeral=True
                     )
             else:
-                # guild.get_role() が None -> ロールが見つからない(削除された?)ケース
                 await interaction.response.send_message(
-                    "ロールが見つかりませんでした。",
+                    "No configuration found for this server. Please use /setup first.",
                     ephemeral=True
                 )
         else:
-            # not eligible の場合
+            # Not eligible
             await interaction.response.send_message(
-                f"You are not eligible (UID: {user_id_str}).",
+                f"You are **not eligible** (UID: {user_id_str}).",
                 ephemeral=True
             )
 
-# =========================
-# 実行
-# =========================
-bot.run(TOKEN)
+
+# ============================
+# Main
+# ============================
+if __name__ == "__main__":
+    bot.run(TOKEN)
