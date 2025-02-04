@@ -5,6 +5,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from datetime import datetime  # <-- ADDED for timestamps
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -12,6 +13,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 # =============== SETTINGS ===============
 CSV_FILE_NAME = "output.csv"             # CSVファイル名
 CONFIG_FILE_NAME = "guild_config.json"    # JSON保存ファイル
+
+GRANTED_HISTORY_FILE = "granted_history.json"  # <-- NEW: Where we'll store granted role history
 # ========================================
 
 # 有効UID (文字列型で保持)
@@ -44,6 +47,35 @@ def load_guild_config():
 def save_guild_config():
     with open(CONFIG_FILE_NAME, "w", encoding="utf-8") as f:
         json.dump(guild_config, f, ensure_ascii=False, indent=2)
+
+# ===========================
+# Granted History Management
+# ===========================
+granted_history = {}  
+# Format:
+# {
+#   "guild_id_str": [
+#       {
+#         "uid": "1234567890",
+#         "username": "User#1234",
+#         "timestamp": "2025-01-01T00:00:00"
+#       },
+#       ...
+#   ],
+#   ...
+# }
+
+def load_granted_history():
+    global granted_history
+    if os.path.exists(GRANTED_HISTORY_FILE):
+        with open(GRANTED_HISTORY_FILE, "r", encoding="utf-8") as f:
+            granted_history = json.load(f)
+    else:
+        granted_history = {}
+
+def save_granted_history():
+    with open(GRANTED_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(granted_history, f, ensure_ascii=False, indent=2)
 
 # ---------------------------
 # CSV読み込み
@@ -87,6 +119,7 @@ async def on_ready():
 
     # JSON & CSV のロード
     load_guild_config()
+    load_granted_history()  # <-- NEW: load the granted history at startup
     loaded_count = load_csv()
     print(f"CSV reloaded. {loaded_count} UIDs loaded.")
 
@@ -205,18 +238,27 @@ class CheckEligibilityButton(discord.ui.Button):
         if user_id_str in valid_uids:
             # Eligible -> Grant role
             if guild_id_str in guild_config:
-                # 取得
                 role_id = guild_config[guild_id_str]["role_id"]
                 role = interaction.guild.get_role(role_id)
                 if role:
                     try:
                         await interaction.user.add_roles(role)
+                        # ============ NEW: Log the user in granted_history ============
+                        if guild_id_str not in granted_history:
+                            granted_history[guild_id_str] = []
+                        granted_history[guild_id_str].append({
+                            "uid": user_id_str,
+                            "username": str(interaction.user),
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        save_granted_history()
+                        # ==========================================================
+
                         await interaction.response.send_message(
                             f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!",
                             ephemeral=True
                         )
                     except discord.Forbidden:
-                        # Botがロール付与できる権限を持っていないケース
                         await interaction.response.send_message(
                             "Bot does not have permission to add that role.",
                             ephemeral=True
@@ -238,6 +280,38 @@ class CheckEligibilityButton(discord.ui.Button):
                 ephemeral=True
             )
 
+# ============================
+# NEW COMMAND: /grantedhistory
+# ============================
+@bot.tree.command(name="grantedhistory", description="Show the list of users who have been granted a role.")
+@app_commands.default_permissions(administrator=True)
+async def granted_history_command(interaction: discord.Interaction):
+    """
+    Shows the stored history of granted roles (UID, username, timestamp) for this server.
+    Only the command invoker (admin) sees this (ephemeral).
+    """
+    guild_id_str = str(interaction.guild_id)
+    records = granted_history.get(guild_id_str, [])
+
+    if not records:
+        await interaction.response.send_message("No one has been granted a role yet.", ephemeral=True)
+        return
+
+    # Build a short text summary
+    # Depending on server usage, this could get long, but ephemeral should handle some length.
+    # We'll just show up to 20 most recent for safety:
+    recent_records = records[-20:]  # last 20
+    lines = []
+    for r in recent_records:
+        uid = r["uid"]
+        user_name = r["username"]
+        tstamp = r["timestamp"]
+        lines.append(f"UID: {uid}, Name: {user_name}, Time: {tstamp}")
+    # If there's more than 20, mention that we only showed last 20
+    note = f"Showing last {len(recent_records)} of {len(records)} records" if len(records) > 20 else f"Total: {len(records)} record(s)"
+
+    msg = "Granted History:\n```\n" + "\n".join(lines) + "\n```\n" + note
+    await interaction.response.send_message(msg, ephemeral=True)
 
 # ============================
 # Main
