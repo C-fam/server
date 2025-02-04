@@ -231,11 +231,11 @@ async def setup_command(
     )
 
 # ------------------------------------
-# /reloadList (CSV再読み込み)
+# /reloadlist (CSV再読み込み)
 # ------------------------------------
-@bot.tree.command(name="reloadList", description="Reload the user list from CSV.")
+@bot.tree.command(name="reloadlist", description="Reload the user list from CSV.")
 @app_commands.default_permissions(administrator=True)
-async def reloadList_command(interaction: discord.Interaction):
+async def reloadlist_command(interaction: discord.Interaction):
     count = load_uid_list()
     await interaction.response.send_message(
         f"Reloaded user list. {count} UIDs found.",
