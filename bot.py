@@ -236,6 +236,9 @@ async def setup_command(
 @bot.tree.command(name="reloadlist", description="Reload the user list from CSV.")
 @app_commands.default_permissions(administrator=True)
 async def reloadlist_command(interaction: discord.Interaction):
+    """
+    Reload the user ID list from output.csv.
+    """
     count = load_uid_list()
     await interaction.response.send_message(
         f"Reloaded user list. {count} UIDs found.",
@@ -364,7 +367,6 @@ class NextButton(discord.ui.Button):
         await interaction.response.defer_update()
         await interaction.edit_original_response(content=view.get_page_content(), view=view)
 
-
 # ------------------------------------
 # 任意のサーバー情報抽出例
 # ------------------------------------
@@ -395,7 +397,6 @@ async def extractinfo_command(interaction: discord.Interaction):
 
     report = "\n".join(lines)
     await interaction.response.send_message(report, ephemeral=True)
-
 
 if __name__ == "__main__":
     bot.run(TOKEN)
