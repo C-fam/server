@@ -1,479 +1,246 @@
 import os
 import csv
 import json
-import logging
-import asyncio
-from datetime import datetime
-from math import ceil
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-# Google Sheets 用ライブラリ（同期処理なので asyncio.to_thread() で非同期化）
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
-# --- ログ設定 ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
-
-# --- 環境変数の読み込み ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-CSV_FILE_NAME = "output.csv"
 
-if TOKEN is None:
-    logger.error("BOT_TOKEN not found in environment variables.")
-    exit(1)
+# =============== SETTINGS ===============
+CSV_FILE_NAME = "output.csv"             # CSVファイル名
+CONFIG_FILE_NAME = "guild_config.json"    # JSON保存ファイル
+# ========================================
 
-# --- Google Sheets 認証の設定 ---
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-google_credentials_str = os.getenv("GOOGLE_CREDENTIALS")
-if google_credentials_str is None:
-    logger.error("GOOGLE_CREDENTIALS not found in environment variables.")
-    exit(1)
-try:
-    creds_dict = json.loads(google_credentials_str)
-except Exception as e:
-    logger.error("Failed to parse GOOGLE_CREDENTIALS: %s", e)
-    exit(1)
+# 有効UID (文字列型で保持)
+valid_uids = set()
 
-CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-try:
-    GSPREAD_CLIENT = gspread.authorize(CREDS)
-except Exception as e:
-    logger.error("Failed to authorize Google Sheets client: %s", e)
-    exit(1)
+# ギルドごとの設定を保持する辞書
+# 形式: {
+#   guild_id (str): {
+#       "channel_id": int,
+#       "channel_name": str,
+#       "role_id": int,
+#       "role_name": str,
+#       "message_id": int
+#   },
+#   ...
+# }
+guild_config = {}
 
-# ※ スプレッドシート名は "keone_list_log"（必要に応じて変更してください）
-try:
-    SPREADSHEET = GSPREAD_CLIENT.open("keone_list_log")
-except Exception as e:
-    logger.error("Failed to open spreadsheet: %s", e)
-    exit(1)
+# ---------------------------
+# JSON 読み込み/書き込み
+# ---------------------------
+def load_guild_config():
+    global guild_config
+    if os.path.exists(CONFIG_FILE_NAME):
+        with open(CONFIG_FILE_NAME, "r", encoding="utf-8") as f:
+            guild_config = json.load(f)
+    else:
+        guild_config = {}
 
+def save_guild_config():
+    with open(CONFIG_FILE_NAME, "w", encoding="utf-8") as f:
+        json.dump(guild_config, f, ensure_ascii=False, indent=2)
 
-# --- DataManager クラス ---
-class DataManager:
-    def __init__(self):
-        self.valid_uids = set()   # CSVから読み込む UID 一覧
-        self.guild_config = {}    # {guild_id: {"server_name", "channel_id", "role_id", "message_id"}}
-        self.granted_history = {} # {guild_id: [ {"uid", "username", "time"}, ... ]}
+# ---------------------------
+# CSV読み込み
+# ---------------------------
+def load_csv():
+    """
+    Returns: 読み込んだUIDの数
+    """
+    global valid_uids
+    new_valid_uids = set()
+    
+    try:
+        with open(CSV_FILE_NAME, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                uid = row.get("DCUID")
+                if uid:
+                    new_valid_uids.add(uid)
+    except FileNotFoundError:
+        print(f"CSV file '{CSV_FILE_NAME}' not found. Creating an empty set.")
+    
+    valid_uids = new_valid_uids
+    return len(valid_uids)
 
-    async def get_sheet(self, sheet_name: str, rows="1000", cols="10"):
-        def _get_sheet():
-            try:
-                return SPREADSHEET.worksheet(sheet_name)
-            except Exception:
-                return SPREADSHEET.add_worksheet(title=sheet_name, rows=rows, cols=cols)
-        return await asyncio.to_thread(_get_sheet)
-
-    async def load_uid_list(self) -> int:
-        new_uids = set()
-        try:
-            with open(CSV_FILE_NAME, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    uid = row.get("DCUID")
-                    if uid:
-                        new_uids.add(uid)
-            logger.info("Loaded %d UIDs from CSV.", len(new_uids))
-        except FileNotFoundError:
-            logger.warning("%s not found.", CSV_FILE_NAME)
-        self.valid_uids = new_uids
-        return len(self.valid_uids)
-
-    async def load_guild_config_sheet(self):
-        def _load():
-            config = {}
-            try:
-                ws = SPREADSHEET.worksheet("guild_config")
-                records = ws.get_all_records()
-                for row in records:
-                    guild_id = str(row.get("guild_id", "")).strip()
-                    if guild_id:
-                        config[guild_id] = {
-                            "server_name": row.get("server_name", ""),
-                            "channel_id": int(row.get("channel_id") or 0),
-                            "role_id": int(row.get("role_id") or 0),
-                            "message_id": int(row.get("message_id") or 0)
-                        }
-            except Exception as e:
-                logger.error("Error loading guild_config: %s", e)
-            return config
-        self.guild_config = await asyncio.to_thread(_load)
-
-    async def save_guild_config_sheet(self):
-        ws = await self.get_sheet("guild_config", rows="100", cols="10")
-        headers = ["guild_id", "server_name", "channel_id", "role_id", "message_id"]
-        data = [headers]
-        for gid, conf in self.guild_config.items():
-            row = [
-                gid,
-                conf.get("server_name", ""),
-                conf.get("channel_id", ""),
-                conf.get("role_id", ""),
-                conf.get("message_id", "")
-            ]
-            data.append(row)
-
-        def _update():
-            ws.clear()
-            ws.update("A1", data)
-        await asyncio.to_thread(_update)
-        logger.info("Guild config sheet saved.")
-
-    async def load_granted_history_sheet(self):
-        def _load():
-            history = {}
-            try:
-                ws = SPREADSHEET.worksheet("granted_history")
-                records = ws.get_all_records()
-                for row in records:
-                    guild_id = str(row.get("guild_id", "")).strip()
-                    if guild_id:
-                        history.setdefault(guild_id, []).append({
-                            "uid": row.get("uid", ""),
-                            "username": row.get("username", ""),
-                            "time": row.get("time", "")
-                        })
-            except Exception as e:
-                logger.error("Error loading granted_history: %s", e)
-            return history
-        self.granted_history = await asyncio.to_thread(_load)
-
-    async def save_granted_history_sheet(self):
-        ws = await self.get_sheet("granted_history", rows="1000", cols="10")
-        headers = ["guild_id", "uid", "username", "time"]
-        data = [headers]
-        for gid, records in self.granted_history.items():
-            for record in records:
-                row = [
-                    gid,
-                    record.get("uid", ""),
-                    record.get("username", ""),
-                    record.get("time", "")
-                ]
-                data.append(row)
-
-        def _update():
-            ws.clear()
-            ws.update("A1", data)
-        await asyncio.to_thread(_update)
-        logger.info("Granted history sheet saved.")
-
-    async def append_log_to_sheet(self, guild_id: str, uid: str, username: str, timestamp: str):
-        ws = await self.get_sheet("Log")
-        def _append():
-            try:
-                ws.append_row([guild_id, uid, username, timestamp])
-            except Exception as e:
-                logger.error("Failed to append log to sheet: %s", e)
-        await asyncio.to_thread(_append)
-
-    async def load_all_data(self):
-        await self.load_uid_list()
-        await self.load_guild_config_sheet()
-        await self.load_granted_history_sheet()
-
-    async def save_all_data(self):
-        await self.save_guild_config_sheet()
-        await self.save_granted_history_sheet()
-
-
-# グローバルなデータマネージャーインスタンス
-data_manager = DataManager()
-
-# --- Discord Bot の初期化 ---
+# ---------------------------
+# Discord Bot Setup
+# ---------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+intents.members = True  # Required for add_roles
+intents.presences = False  # Usually not needed unless you specifically need presence info
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
-# --- 永続的な UI コンポーネント: チェックボタンとビュー ---
-class CheckEligibilityButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(
-            custom_id="check_eligibility_button",  # 変更しないことで永続性を担保
-            label="Check Eligibility",
-            style=discord.ButtonStyle.primary
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        # ※ 最初に早めの応答（defer）を返すことでタイムアウトを防ぐ
-        await interaction.response.defer(ephemeral=True)
-        guild_id_str = str(interaction.guild_id)
-        user_id_str = str(interaction.user.id)
-
-        # UID チェック
-        if user_id_str not in data_manager.valid_uids:
-            return await interaction.followup.send(
-                f"You are not eligible (UID: {user_id_str}).", ephemeral=True
-            )
-
-        info = data_manager.guild_config.get(guild_id_str)
-        if not info:
-            return await interaction.followup.send(
-                "No setup found. Please run /setup.", ephemeral=True
-            )
-
-        role = interaction.guild.get_role(info["role_id"])
-        if not role:
-            return await interaction.followup.send("Configured role not found.", ephemeral=True)
-
-        if role in interaction.user.roles:
-            return await interaction.followup.send("You already have this role.", ephemeral=True)
-
-        try:
-            await interaction.user.add_roles(role)
-        except discord.Forbidden:
-            return await interaction.followup.send("Failed to grant role. Check bot permissions.", ephemeral=True)
-
-        timestamp = datetime.utcnow().isoformat()
-        log_entry = {
-            "uid": user_id_str,
-            "username": str(interaction.user),
-            "time": timestamp
-        }
-        data_manager.granted_history.setdefault(guild_id_str, []).append(log_entry)
-        # 更新は非同期で実施
-        await data_manager.save_granted_history_sheet()
-        await data_manager.append_log_to_sheet(guild_id_str, user_id_str, str(interaction.user), timestamp)
-
-        # followup.send を使ってエフェメラルメッセージを返す
-        await interaction.followup.send(
-            f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!",
-            ephemeral=True
-        )
-
-
-class CheckEligibilityView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(CheckEligibilityButton())
-
-
-# --- 履歴表示用のページング UI ---
-class HistoryPagerView(discord.ui.View):
-    def __init__(self, records):
-        super().__init__(timeout=None)
-        self.records = records
-        self.page = 0
-        self.per_page = 10
-        self.prev_button = PrevButton()
-        self.next_button = NextButton()
-        self.add_item(self.prev_button)
-        self.add_item(self.next_button)
-        self.update_buttons()
-
-    def max_page(self):
-        return ceil(len(self.records) / self.per_page) if self.records else 1
-
-    def update_buttons(self):
-        self.prev_button.disabled = (self.page <= 0)
-        self.next_button.disabled = (self.page >= self.max_page() - 1)
-
-    def get_page_content(self):
-        start = self.page * self.per_page
-        end = start + self.per_page
-        chunk = self.records[start:end]
-        lines = []
-        for i, record in enumerate(chunk, start=1):
-            idx = start + i
-            lines.append(f"[{idx}] UID: {record['uid']}, User: {record['username']}, Time: {record['time']}")
-        info = f"Page {self.page+1}/{self.max_page()} (Total {len(self.records)})"
-        if not lines:
-            lines.append("No data on this page.")
-        text = "\n".join(lines)
-        return f"**History**\n```\n{text}\n```\n{info}"
-
-
-class PrevButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="◀ Prev", style=discord.ButtonStyle.secondary)
-
-    async def callback(self, interaction: discord.Interaction):
-        view: HistoryPagerView = self.view  # type: ignore
-        if view.page > 0:
-            view.page -= 1
-        view.update_buttons()
-        await interaction.response.defer_update()
-        await interaction.edit_original_response(content=view.get_page_content(), view=view)
-
-
-class NextButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Next ▶", style=discord.ButtonStyle.secondary)
-
-    async def callback(self, interaction: discord.Interaction):
-        view: HistoryPagerView = self.view  # type: ignore
-        if view.page < view.max_page() - 1:
-            view.page += 1
-        view.update_buttons()
-        await interaction.response.defer_update()
-        await interaction.edit_original_response(content=view.get_page_content(), view=view)
-
-
-# --- Bot イベント ---
+# ---------------------------
+# 起動時
+# ---------------------------
 @bot.event
 async def on_ready():
-    logger.info("Bot logged in as %s", bot.user)
-    await data_manager.load_all_data()
-    logger.info("UID loaded: %d", len(data_manager.valid_uids))
+    print(f"Bot logged in as {bot.user}")
+
+    # JSON & CSV のロード
+    load_guild_config()
+    loaded_count = load_csv()
+    print(f"CSV reloaded. {loaded_count} UIDs loaded.")
+
+    # スラッシュコマンド同期
     try:
         await bot.tree.sync()
-        logger.info("Slash commands synced.")
+        print("Slash commands synced.")
     except Exception as e:
-        logger.error("Error syncing slash commands: %s", e)
-    # 永続的な View を登録（custom_id に変更がなければ、以前のメッセージも有効）
-    bot.add_view(CheckEligibilityView())
+        print(e)
 
-
-@bot.event
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    logger.error("App command error: %s", error)
-    if interaction.response.is_done():
-        await interaction.followup.send("An error occurred. Please try again or contact an admin.", ephemeral=True)
-    else:
-        await interaction.response.send_message(
-            "An error occurred. Please try again or contact an admin.",
-            ephemeral=True
-        )
-
-
-# --- /setup コマンド ---
-@bot.tree.command(name="setup", description="Set up or update the eligibility button and assigned role.")
+# ============================
+# /setup command
+# ============================
+@bot.tree.command(name="setup", description="Set up the role and button for eligibility checking.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    channel="Channel for the check button",
-    role="Role to grant if eligible"
+    channel="Select the channel to send the button message",
+    role="Select the role to be granted if eligible"
 )
 async def setup_command(
     interaction: discord.Interaction,
     channel: discord.TextChannel,
     role: discord.Role
 ):
+    """
+    Usage Example:
+    /setup channel:#general role:@MyRole
+    """
     guild_id_str = str(interaction.guild_id)
-    old_info = data_manager.guild_config.get(guild_id_str, {})
-    old_msg_id = old_info.get("message_id")
-    old_ch_id = old_info.get("channel_id", 0)
+    
+    # 既存のメッセージがあれば削除 or 編集
+    old_message_id = None
+    if guild_id_str in guild_config:
+        old_message_id = guild_config[guild_id_str].get("message_id")
 
-    embed_text = "Click the button below to see if you're on the list."
-    if old_msg_id and old_ch_id:
-        old_ch = interaction.guild.get_channel(old_ch_id)
-        if old_ch:
-            try:
-                old_msg = await old_ch.fetch_message(old_msg_id)
-                embed = discord.Embed(
-                    title="Check Eligibility",
-                    description=embed_text,
-                    color=discord.Color.blue()
-                )
-                view = CheckEligibilityView()
-                await old_msg.edit(embed=embed, view=view)
-                data_manager.guild_config[guild_id_str] = {
-                    "server_name": interaction.guild.name,
-                    "channel_id": channel.id,
-                    "role_id": role.id,
-                    "message_id": old_msg.id
-                }
-                await data_manager.save_guild_config_sheet()
-                return await interaction.response.send_message(
-                    f"Button message updated in {old_ch.mention}. Role set to {role.mention}.",
-                    ephemeral=True
-                )
-            except Exception as e:
-                logger.error("Error editing old message: %s", e)
+    # もし古いメッセージがある場合、削除して新しいチャンネルに投稿する(編集で同じチャンネルに貼り直すのも可)
+    if old_message_id is not None:
+        # 古いメッセージを削除(存在する＆Botが削除権限を持っている場合)
+        try:
+            old_channel_id = guild_config[guild_id_str]["channel_id"]
+            old_channel = interaction.guild.get_channel(old_channel_id)
+            if old_channel:
+                old_message = await old_channel.fetch_message(old_message_id)
+                await old_message.delete()
+        except Exception as e:
+            print(f"Failed to delete old message: {e}")
 
+    # 新しいメッセージを作成
     embed = discord.Embed(
         title="Check Eligibility",
-        description=embed_text,
+        description=(
+            "Click the button below to check if you are eligible.\n"
+            "If eligible, you will be granted the specified role."
+        ),
         color=discord.Color.blue()
     )
     view = CheckEligibilityView()
-    new_msg = await channel.send(embed=embed, view=view)
-    data_manager.guild_config[guild_id_str] = {
-        "server_name": interaction.guild.name,
+
+    # 送信
+    msg = await channel.send(embed=embed, view=view)
+
+    # ギルド設定を保存
+    guild_config[guild_id_str] = {
         "channel_id": channel.id,
+        "channel_name": channel.name,
         "role_id": role.id,
-        "message_id": new_msg.id
+        "role_name": role.name,
+        "message_id": msg.id
     }
-    await data_manager.save_guild_config_sheet()
+    save_guild_config()
+
     await interaction.response.send_message(
-        f"Setup complete in {channel.mention} with role {role.mention}.",
+        f"Setup completed in {channel.mention} with role: {role.mention}.",
         ephemeral=True
     )
 
-
-# --- /reloadlist コマンド ---
-@bot.tree.command(name="reloadlist", description="Reload the user list from CSV.")
+# ============================
+# /relodelist command
+# ============================
+@bot.tree.command(name="relodelist", description="Reload the CSV list manually.")
 @app_commands.default_permissions(administrator=True)
-async def reloadlist_command(interaction: discord.Interaction):
-    count = await data_manager.load_uid_list()
+async def relodelist_command(interaction: discord.Interaction):
+    """
+    Reloads the CSV file and tells how many UIDs were loaded.
+    """
+    loaded_count = load_csv()
     await interaction.response.send_message(
-        f"Reloaded user list. {count} UIDs found.",
+        f"CSV reloaded successfully. **{loaded_count}** UIDs loaded.",
         ephemeral=True
     )
 
+# ============================
+# ボタンView
+# ============================
+class CheckEligibilityView(discord.ui.View):
+    def __init__(self):
+        # timeout=Noneで再起動まで押せる (ただし再起動すると無効になる)
+        super().__init__(timeout=None)
+        self.add_item(CheckEligibilityButton())
 
-# --- /history コマンド ---
-@bot.tree.command(name="history", description="Show the role-grant history in pages of 10.")
-@app_commands.default_permissions(administrator=True)
-async def history_command(interaction: discord.Interaction):
-    # 常に最新の history をシートから再読み込み
-    await data_manager.load_granted_history_sheet()
-    guild_id_str = str(interaction.guild_id)
-    records = data_manager.granted_history.get(guild_id_str, [])
-    if not records:
-        return await interaction.response.send_message("No history for this server.", ephemeral=True)
-    view = HistoryPagerView(records)
-    await interaction.response.send_message(view.get_page_content(), view=view, ephemeral=True)
+# ============================
+# ボタン本体
+# ============================
+class CheckEligibilityButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Check Eligibility",
+            style=discord.ButtonStyle.primary
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id_str = str(interaction.user.id)
+        guild_id_str = str(interaction.guild_id)
+
+        # Check if user is in CSV list
+        if user_id_str in valid_uids:
+            # Eligible -> Grant role
+            if guild_id_str in guild_config:
+                # 取得
+                role_id = guild_config[guild_id_str]["role_id"]
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    try:
+                        await interaction.user.add_roles(role)
+                        await interaction.response.send_message(
+                            f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!",
+                            ephemeral=True
+                        )
+                    except discord.Forbidden:
+                        # Botがロール付与できる権限を持っていないケース
+                        await interaction.response.send_message(
+                            "Bot does not have permission to add that role.",
+                            ephemeral=True
+                        )
+                else:
+                    await interaction.response.send_message(
+                        "The configured role no longer exists on this server.",
+                        ephemeral=True
+                    )
+            else:
+                await interaction.response.send_message(
+                    "No configuration found for this server. Please use /setup first.",
+                    ephemeral=True
+                )
+        else:
+            # Not eligible
+            await interaction.response.send_message(
+                f"You are **not eligible** (UID: {user_id_str}).",
+                ephemeral=True
+            )
 
 
-# --- /extractinfo コマンド ---
-@bot.tree.command(name="extractinfo", description="Extract server info and recent role assignments.")
-@app_commands.default_permissions(administrator=True)
-async def extractinfo_command(interaction: discord.Interaction):
-    guild_id_str = str(interaction.guild_id)
-    # 常に最新の history を読み込む
-    await data_manager.load_granted_history_sheet()
-    info = data_manager.guild_config.get(guild_id_str)
-    if not info:
-        return await interaction.response.send_message("No setup info found for this server.", ephemeral=True)
-
-    ch_id = info["channel_id"]
-    role_id = info["role_id"]
-    msg_id = info["message_id"]
-
-    lines = [
-        "**Server Info**",
-        f"- Server Name: {info.get('server_name', '')}",
-        f"- Channel ID: {ch_id}",
-        f"- Role ID: {role_id}",
-        f"- Setup Message ID: {msg_id}",
-        "",
-        f"**Recent Role Grants** (total {len(data_manager.granted_history.get(guild_id_str, []))})"
-    ]
-    recs = data_manager.granted_history.get(guild_id_str, [])
-    for i, record in enumerate(recs[-10:], start=1):
-        lines.append(f"{i}. UID: {record['uid']}, Name: {record['username']}, Time: {record['time']}")
-
-    report = "\n".join(lines)
-    await interaction.response.send_message(report, ephemeral=True)
-
-
-# --- /reset_history コマンド ---
-@bot.tree.command(name="reset_history", description="Reset the role-grant history (admin only).")
-@app_commands.default_permissions(administrator=True)
-async def reset_history_command(interaction: discord.Interaction):
-    guild_id_str = str(interaction.guild_id)
-    data_manager.granted_history[guild_id_str] = []
-    await data_manager.save_granted_history_sheet()
-    await interaction.response.send_message("History has been reset for this server.", ephemeral=True)
-
-
+# ============================
+# Main
+# ============================
 if __name__ == "__main__":
     bot.run(TOKEN)
