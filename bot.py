@@ -320,8 +320,8 @@ class HistoryPagerView(discord.ui.View):
         chunk = self.records[start:end]
         lines = []
         for i, record in enumerate(chunk, start=1):
-            # UID の先頭に付いているアポストロフィを除去
-            uid_clean = record["uid"].lstrip("'")
+            uid_raw = record["uid"]
+            uid_clean = uid_raw.lstrip("'")
             lines.append(f"{start + i}. <@{uid_clean}>")
         description = ("This list shows the server's role assignment history.\n"
                        "Below are the recent assignments:\n\n" +
@@ -492,7 +492,8 @@ async def extractinfo_command(interaction: discord.Interaction):
     ]
     recs = data_manager.granted_history.get(guild_id_str, [])
     for i, record in enumerate(recs[-10:], start=1):
-        lines.append(f"{i}. <@{record['uid'].lstrip(\"'\")}>")
+        uid_clean = record['uid'].lstrip("'")
+        lines.append(f"{i}. <@{uid_clean}>")
     report = "\n".join(lines)
     await interaction.response.send_message(report, ephemeral=True)
 
