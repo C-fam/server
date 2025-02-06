@@ -1,5 +1,6 @@
 import os
 import csv
+import json
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -11,7 +12,7 @@ from math import ceil
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# 環境変数の読み込み (.env に BOT_TOKEN などを定義)
+# 環境変数の読み込み (.env に BOT_TOKEN や GOOGLE_CREDENTIALS を定義)
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -30,15 +31,20 @@ guild_config = {}   # {guild_id: {"channel_id": int, "role_id": int, "message_id
 granted_history = {}  # {guild_id: [ {"uid": str, "username": str, "time": str}, ... ]}
 
 # ---------------------------
-# Google Sheets の設定
+# Google Sheets の設定 (環境変数から認証情報を取得)
 # ---------------------------
-# ※ credentials.json をプロジェクトルートに配置してください。
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
+google_credentials_str = os.getenv("GOOGLE_CREDENTIALS")
+if google_credentials_str is None:
+    raise Exception("GOOGLE_CREDENTIALS not found in environment variables.")
+try:
+    creds_dict = json.loads(google_credentials_str)
+except Exception as e:
+    raise Exception("Failed to parse GOOGLE_CREDENTIALS: " + str(e))
+CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
 GSPREAD_CLIENT = gspread.authorize(CREDS)
-# ※ YourSpreadsheetName をご自身のスプレッドシート名に変更してください
+# ※ "YourSpreadsheetName" と "Log" はご自身のスプレッドシート名・シート名に変更してください
 SPREADSHEET = GSPREAD_CLIENT.open("YourSpreadsheetName")
-# ※ "Log" シート名も適宜変更してください
 LOG_SHEET = SPREADSHEET.worksheet("Log")
 
 def append_log_to_sheet(guild_id: str, uid: str, username: str, timestamp: str):
