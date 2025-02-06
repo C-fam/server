@@ -174,27 +174,27 @@ class CheckEligibilityButton(discord.ui.Button):
         if user_id_str not in valid_uids:
             return await interaction.response.send_message(
                 f"You are not eligible (UID: {user_id_str}).",
-                ephemeral=False
+                ephemeral=True
             )
 
         info = guild_config.get(guild_id_str)
         if not info:
             return await interaction.response.send_message(
                 "No setup found. Please run /setup.",
-                ephemeral=False
+                ephemeral=True
             )
 
         role = interaction.guild.get_role(info["role_id"])
         if not role:
-            return await interaction.response.send_message("Configured role not found.", ephemeral=False)
+            return await interaction.response.send_message("Configured role not found.", ephemeral=True)
 
         if role in interaction.user.roles:
-            return await interaction.response.send_message("You already have this role.", ephemeral=False)
+            return await interaction.response.send_message("You already have this role.", ephemeral=True)
 
         try:
             await interaction.user.add_roles(role)
         except discord.Forbidden:
-            return await interaction.response.send_message("Failed to grant role. Check bot permissions.", ephemeral=False)
+            return await interaction.response.send_message("Failed to grant role. Check bot permissions.", ephemeral=True)
 
         log_entry = {
             "uid": user_id_str,
@@ -207,7 +207,7 @@ class CheckEligibilityButton(discord.ui.Button):
 
         await interaction.response.send_message(
             f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!",
-            ephemeral=False
+            ephemeral=True
         )
 
 class CheckEligibilityView(discord.ui.View):
