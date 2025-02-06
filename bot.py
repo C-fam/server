@@ -123,9 +123,9 @@ class DataManager:
             row = [
                 gid,
                 conf.get("server_name", ""),
-                conf.get("channel_id", ""),
-                conf.get("role_id", ""),
-                conf.get("message_id", "")
+                int(conf.get("channel_id", 0)),
+                int(conf.get("role_id", 0)),
+                int(conf.get("message_id", 0))
             ]
             data.append(row)
 
@@ -160,9 +160,9 @@ class DataManager:
         data = [headers]
         for gid, records in self.granted_history.items():
             for record in records:
-                # uidを文字列として保存するため先頭にアポストロフィを付ける
+                # uidは文字列として保存するため先頭にアポストロフィを付ける
                 uid_str = f"'{record.get('uid', '')}"
-                # timeは人間が読みやすい形式に変換
+                # timeは読みやすい形式に変換
                 time_str = format_time(record.get("time", ""))
                 row = [gid, uid_str, record.get("username", ""), time_str]
                 data.append(row)
