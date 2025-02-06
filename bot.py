@@ -44,7 +44,7 @@ except Exception as e:
 CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
 GSPREAD_CLIENT = gspread.authorize(CREDS)
 # ※ "YourSpreadsheetName" と "Log" はご自身のスプレッドシート名・シート名に変更してください
-SPREADSHEET = GSPREAD_CLIENT.open("YourSpreadsheetName")
+SPREADSHEET = GSPREAD_CLIENT.open("keone_list_log")
 LOG_SHEET = SPREADSHEET.worksheet("Log")
 
 def append_log_to_sheet(guild_id: str, uid: str, username: str, timestamp: str):
