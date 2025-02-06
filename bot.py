@@ -62,7 +62,6 @@ class DataManager:
         self.guild_config = {}    # {guild_id: {"server_name", "channel_id", "role_id", "message_id"}}
         self.granted_history = {} # {guild_id: [ {"uid", "username", "time"}, ... ]}
 
-    # --- シート取得共通処理 ---
     async def get_sheet(self, sheet_name: str, rows="1000", cols="10"):
         def _get_sheet():
             try:
@@ -198,38 +197,40 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 class CheckEligibilityButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
-            custom_id="check_eligibility_button",
+            custom_id="check_eligibility_button",  # 変更しないことで永続性を担保
             label="Check Eligibility",
             style=discord.ButtonStyle.primary
         )
 
     async def callback(self, interaction: discord.Interaction):
+        # ※ 最初に早めの応答（defer）を返すことでタイムアウトを防ぐ
+        await interaction.response.defer(ephemeral=True)
         guild_id_str = str(interaction.guild_id)
         user_id_str = str(interaction.user.id)
 
         # UID チェック
         if user_id_str not in data_manager.valid_uids:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"You are not eligible (UID: {user_id_str}).", ephemeral=True
             )
 
         info = data_manager.guild_config.get(guild_id_str)
         if not info:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "No setup found. Please run /setup.", ephemeral=True
             )
 
         role = interaction.guild.get_role(info["role_id"])
         if not role:
-            return await interaction.response.send_message("Configured role not found.", ephemeral=True)
+            return await interaction.followup.send("Configured role not found.", ephemeral=True)
 
         if role in interaction.user.roles:
-            return await interaction.response.send_message("You already have this role.", ephemeral=True)
+            return await interaction.followup.send("You already have this role.", ephemeral=True)
 
         try:
             await interaction.user.add_roles(role)
         except discord.Forbidden:
-            return await interaction.response.send_message("Failed to grant role. Check bot permissions.", ephemeral=True)
+            return await interaction.followup.send("Failed to grant role. Check bot permissions.", ephemeral=True)
 
         timestamp = datetime.utcnow().isoformat()
         log_entry = {
@@ -238,11 +239,12 @@ class CheckEligibilityButton(discord.ui.Button):
             "time": timestamp
         }
         data_manager.granted_history.setdefault(guild_id_str, []).append(log_entry)
-        # 両方のシートに非同期で反映（失敗時もログ出力）
+        # 更新は非同期で実施
         await data_manager.save_granted_history_sheet()
         await data_manager.append_log_to_sheet(guild_id_str, user_id_str, str(interaction.user), timestamp)
 
-        await interaction.response.send_message(
+        # followup.send を使ってエフェメラルメッセージを返す
+        await interaction.followup.send(
             f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!",
             ephemeral=True
         )
@@ -326,7 +328,7 @@ async def on_ready():
         logger.info("Slash commands synced.")
     except Exception as e:
         logger.error("Error syncing slash commands: %s", e)
-    # 常駐ビュー登録
+    # 永続的な View を登録（custom_id に変更がなければ、以前のメッセージも有効）
     bot.add_view(CheckEligibilityView())
 
 
@@ -421,7 +423,8 @@ async def reloadlist_command(interaction: discord.Interaction):
 @bot.tree.command(name="history", description="Show the role-grant history in pages of 10.")
 @app_commands.default_permissions(administrator=True)
 async def history_command(interaction: discord.Interaction):
-    await data_manager.load_granted_history_sheet()  # 最新データを再読み込み
+    # 常に最新の history をシートから再読み込み
+    await data_manager.load_granted_history_sheet()
     guild_id_str = str(interaction.guild_id)
     records = data_manager.granted_history.get(guild_id_str, [])
     if not records:
@@ -435,6 +438,8 @@ async def history_command(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def extractinfo_command(interaction: discord.Interaction):
     guild_id_str = str(interaction.guild_id)
+    # 常に最新の history を読み込む
+    await data_manager.load_granted_history_sheet()
     info = data_manager.guild_config.get(guild_id_str)
     if not info:
         return await interaction.response.send_message("No setup info found for this server.", ephemeral=True)
