@@ -16,15 +16,15 @@ from oauth2client.service_account import ServiceAccountCredentials
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-# CSVファイル (output.csv は付与対象UID一覧としてそのまま使用)
-CSV_FILE_NAME = "output.csv"  # 1000件程度のDiscordUIDが入っている
+# CSVファイル (付与対象UID一覧)
+CSV_FILE_NAME = "output.csv"
 
 # メモリ上のデータ保持
 valid_uids = set()   # output.csvから読み込むUIDリスト
-guild_config = {}    # {guild_id: {"server_name", "channel_id", "role_id", "message_id", "debug_channel_id"}}
+guild_config = {}    # {guild_id: {"server_name", "channel_id", "role_id", "message_id"}}
 granted_history = {} # {guild_id: [ {"uid", "username", "time"}, ... ]}
 
-# Google Sheetsの認証情報を環境変数から取得（credentials.jsonは使わず.envのみで管理）
+# Google Sheets の認証情報を環境変数から取得（credentials.jsonは使わず.envのみ）
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 google_credentials_str = os.getenv("GOOGLE_CREDENTIALS")
 if google_credentials_str is None:
@@ -36,23 +36,23 @@ except Exception as e:
 CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
 GSPREAD_CLIENT = gspread.authorize(CREDS)
 
-# ※ スプレッドシート名は "keone_list_log"（ご自身の環境に合わせて変更してください）
+# ※ スプレッドシート名は "keone_list_log"（必要に応じて変更してください）
 try:
     SPREADSHEET = GSPREAD_CLIENT.open("keone_list_log")
 except Exception as e:
     raise Exception("Failed to open spreadsheet: " + str(e))
 
 # --- Google Sheets 関連の関数 ---
+def get_sheet(sheet_name, rows="1000", cols="10"):
+    try:
+        return SPREADSHEET.worksheet(sheet_name)
+    except Exception:
+        return SPREADSHEET.add_worksheet(title=sheet_name, rows=rows, cols=cols)
 
 def get_log_sheet():
-    """Logシートを取得。存在しなければ作成する"""
-    try:
-        return SPREADSHEET.worksheet("Log")
-    except Exception:
-        return SPREADSHEET.add_worksheet(title="Log", rows="1000", cols="10")
+    return get_sheet("Log")
 
 def append_log_to_sheet(guild_id: str, uid: str, username: str, timestamp: str):
-    """Logシートに1行追記する"""
     ws = get_log_sheet()
     try:
         ws.append_row([guild_id, uid, username, timestamp])
@@ -60,7 +60,6 @@ def append_log_to_sheet(guild_id: str, uid: str, username: str, timestamp: str):
         print(f"Failed to append log to sheet: {e}")
 
 def load_guild_config_sheet():
-    """guild_configシートから設定を読み込む。各行は、guild_id, server_name, channel_id, role_id, message_id, debug_channel_id"""
     global guild_config
     guild_config = {}
     try:
@@ -73,19 +72,14 @@ def load_guild_config_sheet():
                     "server_name": row.get("server_name", ""),
                     "channel_id": int(row.get("channel_id") or 0),
                     "role_id": int(row.get("role_id") or 0),
-                    "message_id": int(row.get("message_id") or 0),
-                    "debug_channel_id": int(row.get("debug_channel_id") or 0)
+                    "message_id": int(row.get("message_id") or 0)
                 }
     except Exception as e:
         print(f"Error loading guild_config: {e}")
 
 def save_guild_config_sheet():
-    """guild_configシートに現在の設定を書き出す。シートが存在しなければ作成する"""
-    try:
-        ws = SPREADSHEET.worksheet("guild_config")
-    except Exception:
-        ws = SPREADSHEET.add_worksheet(title="guild_config", rows="100", cols="10")
-    headers = ["guild_id", "server_name", "channel_id", "role_id", "message_id", "debug_channel_id"]
+    ws = get_sheet("guild_config", rows="100", cols="10")
+    headers = ["guild_id", "server_name", "channel_id", "role_id", "message_id"]
     ws.clear()
     data = [headers]
     for gid, conf in guild_config.items():
@@ -94,14 +88,12 @@ def save_guild_config_sheet():
             conf.get("server_name", ""),
             conf.get("channel_id", ""),
             conf.get("role_id", ""),
-            conf.get("message_id", ""),
-            conf.get("debug_channel_id", "")
+            conf.get("message_id", "")
         ]
         data.append(row)
     ws.update("A1", data)
 
 def load_granted_history_sheet():
-    """granted_historyシートから履歴を読み込む。各行は、guild_id, uid, username, time"""
     global granted_history
     granted_history = {}
     try:
@@ -121,11 +113,7 @@ def load_granted_history_sheet():
         print(f"Error loading granted_history: {e}")
 
 def save_granted_history_sheet():
-    """granted_historyシートに履歴を書き出す。シートが存在しなければ作成する"""
-    try:
-        ws = SPREADSHEET.worksheet("granted_history")
-    except Exception:
-        ws = SPREADSHEET.add_worksheet(title="granted_history", rows="1000", cols="10")
+    ws = get_sheet("granted_history", rows="1000", cols="10")
     headers = ["guild_id", "uid", "username", "time"]
     ws.clear()
     data = [headers]
@@ -141,7 +129,6 @@ def save_granted_history_sheet():
     ws.update("A1", data)
 
 def load_uid_list():
-    """output.csvからUID一覧を読み込み、valid_uidsにセットする"""
     global valid_uids
     new_uids = set()
     try:
@@ -175,7 +162,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 class CheckEligibilityButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
-            custom_id="check_eligibility_button",  # 永続用ID
+            custom_id="check_eligibility_button",
             label="Check Eligibility",
             style=discord.ButtonStyle.primary
         )
@@ -187,29 +174,28 @@ class CheckEligibilityButton(discord.ui.Button):
         if user_id_str not in valid_uids:
             return await interaction.response.send_message(
                 f"You are not eligible (UID: {user_id_str}).",
-                ephemeral=True
+                ephemeral=False
             )
 
         info = guild_config.get(guild_id_str)
         if not info:
             return await interaction.response.send_message(
                 "No setup found. Please run /setup.",
-                ephemeral=True
+                ephemeral=False
             )
 
         role = interaction.guild.get_role(info["role_id"])
         if not role:
-            return await interaction.response.send_message("Configured role not found.", ephemeral=True)
+            return await interaction.response.send_message("Configured role not found.", ephemeral=False)
 
         if role in interaction.user.roles:
-            return await interaction.response.send_message("You already have this role.", ephemeral=True)
+            return await interaction.response.send_message("You already have this role.", ephemeral=False)
 
         try:
             await interaction.user.add_roles(role)
         except discord.Forbidden:
-            return await interaction.response.send_message("Failed to grant role. Check bot permissions.", ephemeral=True)
+            return await interaction.response.send_message("Failed to grant role. Check bot permissions.", ephemeral=False)
 
-        # 履歴の保存（メモリ上に追加し、シートに更新）
         log_entry = {
             "uid": user_id_str,
             "username": str(interaction.user),
@@ -217,13 +203,11 @@ class CheckEligibilityButton(discord.ui.Button):
         }
         granted_history.setdefault(guild_id_str, []).append(log_entry)
         save_granted_history_sheet()
-
-        # Logシートに追記
         append_log_to_sheet(guild_id_str, user_id_str, str(interaction.user), datetime.utcnow().isoformat())
 
         await interaction.response.send_message(
             f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!",
-            ephemeral=True
+            ephemeral=False
         )
 
 class CheckEligibilityView(discord.ui.View):
@@ -238,11 +222,18 @@ class HistoryPagerView(discord.ui.View):
         self.records = records
         self.page = 0
         self.per_page = 10
-        self.add_item(PrevButton())
-        self.add_item(NextButton())
+        self.prev_button = PrevButton()
+        self.next_button = NextButton()
+        self.add_item(self.prev_button)
+        self.add_item(self.next_button)
+        self.update_buttons()
 
     def max_page(self):
-        return ceil(len(self.records) / self.per_page)
+        return ceil(len(self.records) / self.per_page) if self.records else 1
+
+    def update_buttons(self):
+        self.prev_button.disabled = (self.page <= 0)
+        self.next_button.disabled = (self.page >= self.max_page() - 1)
 
     def get_page_content(self):
         start = self.page * self.per_page
@@ -266,6 +257,7 @@ class PrevButton(discord.ui.Button):
         view: HistoryPagerView = self.view  # type: ignore
         if view.page > 0:
             view.page -= 1
+        view.update_buttons()
         await interaction.response.defer_update()
         await interaction.edit_original_response(content=view.get_page_content(), view=view)
 
@@ -277,10 +269,10 @@ class NextButton(discord.ui.Button):
         view: HistoryPagerView = self.view  # type: ignore
         if view.page < view.max_page() - 1:
             view.page += 1
+        view.update_buttons()
         await interaction.response.defer_update()
         await interaction.edit_original_response(content=view.get_page_content(), view=view)
 
-# --- Bot イベントハンドラ ---
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
@@ -296,41 +288,29 @@ async def on_ready():
 @bot.event
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     print(f"App command error: {error}")
-    guild = interaction.guild
-    if guild:
-        gid = str(guild.id)
-        if gid in guild_config:
-            dbg_id = guild_config[gid].get("debug_channel_id", 0)
-            if dbg_id:
-                dbg_ch = guild.get_channel(dbg_id)
-                if dbg_ch:
-                    await dbg_ch.send(
-                        f"[DEBUG] An error occurred: {error}\nOften, re-running `/setup` solves issues if there's a recent update."
-                    )
     await interaction.response.send_message(
-        "An error occurred. Please try again or contact an admin.\n(If updated, `/setup` often fixes it.)",
+        "An error occurred. Please try again or contact an admin.",
         ephemeral=True
     )
 
-# --- Slash コマンド ---
-@bot.tree.command(name="setup", description="Set up or update the eligibility button, assigned role, and debug channel.")
+# --- /setup コマンド (debugチャンネル削除、投稿チャンネルと付与するロールのみ) ---
+@bot.tree.command(name="setup", description="Set up or update the eligibility button and assigned role.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     channel="Channel for the check button",
-    role="Role to grant if eligible",
-    debug_channel="Channel for debug logs"
+    role="Role to grant if eligible"
 )
 async def setup_command(
     interaction: discord.Interaction,
     channel: discord.TextChannel,
-    role: discord.Role,
-    debug_channel: discord.TextChannel
+    role: discord.Role
 ):
     guild_id_str = str(interaction.guild_id)
     old_info = guild_config.get(guild_id_str, {})
     old_msg_id = old_info.get("message_id")
     old_ch_id = old_info.get("channel_id", 0)
 
+    embed_text = "Click the button below to see if you're on the list."
     if old_msg_id and old_ch_id:
         old_ch = interaction.guild.get_channel(old_ch_id)
         if old_ch:
@@ -338,7 +318,7 @@ async def setup_command(
                 old_msg = await old_ch.fetch_message(old_msg_id)
                 embed = discord.Embed(
                     title="Check Eligibility",
-                    description="(Updated) Click the button below to see if you're on the list.",
+                    description=embed_text,
                     color=discord.Color.blue()
                 )
                 view = CheckEligibilityView()
@@ -347,21 +327,19 @@ async def setup_command(
                     "server_name": interaction.guild.name,
                     "channel_id": channel.id,
                     "role_id": role.id,
-                    "message_id": old_msg.id,
-                    "debug_channel_id": debug_channel.id
+                    "message_id": old_msg.id
                 }
                 save_guild_config_sheet()
                 return await interaction.response.send_message(
-                    f"**Button message updated** in {old_ch.mention}.\nNew role: {role.mention}, debug channel: {debug_channel.mention}",
+                    f"Button message updated in {old_ch.mention}. Role set to {role.mention}.",
                     ephemeral=True
                 )
             except Exception as e:
                 print(f"Error editing old message: {e}")
 
-    # 新規メッセージ作成
     embed = discord.Embed(
         title="Check Eligibility",
-        description="Click the button below to see if you're on the list.",
+        description=embed_text,
         color=discord.Color.blue()
     )
     view = CheckEligibilityView()
@@ -370,15 +348,15 @@ async def setup_command(
         "server_name": interaction.guild.name,
         "channel_id": channel.id,
         "role_id": role.id,
-        "message_id": new_msg.id,
-        "debug_channel_id": debug_channel.id
+        "message_id": new_msg.id
     }
     save_guild_config_sheet()
     await interaction.response.send_message(
-        f"**Setup complete** in {channel.mention} with role {role.mention}.\nDebug channel: {debug_channel.mention}",
+        f"Setup complete in {channel.mention} with role {role.mention}.",
         ephemeral=True
     )
 
+# --- /reloadlist コマンド ---
 @bot.tree.command(name="reloadlist", description="Reload the user list from CSV.")
 @app_commands.default_permissions(administrator=True)
 async def reloadlist_command(interaction: discord.Interaction):
@@ -388,9 +366,12 @@ async def reloadlist_command(interaction: discord.Interaction):
         ephemeral=True
     )
 
+# --- /history コマンド ---
 @bot.tree.command(name="history", description="Show the role-grant history in pages of 10.")
 @app_commands.default_permissions(administrator=True)
 async def history_command(interaction: discord.Interaction):
+    # 最新のデータをシートから再読み込み
+    load_granted_history_sheet()
     guild_id_str = str(interaction.guild_id)
     records = granted_history.get(guild_id_str, [])
     if not records:
@@ -399,6 +380,7 @@ async def history_command(interaction: discord.Interaction):
     view = HistoryPagerView(records)
     await interaction.response.send_message(view.get_page_content(), view=view, ephemeral=True)
 
+# --- /extractinfo コマンド ---
 @bot.tree.command(name="extractinfo", description="Extract server info and recent role assignments.")
 @app_commands.default_permissions(administrator=True)
 async def extractinfo_command(interaction: discord.Interaction):
@@ -410,7 +392,6 @@ async def extractinfo_command(interaction: discord.Interaction):
     ch_id = info["channel_id"]
     role_id = info["role_id"]
     msg_id = info["message_id"]
-    dbg_id = info["debug_channel_id"]
 
     lines = []
     lines.append("**Server Info**")
@@ -418,7 +399,6 @@ async def extractinfo_command(interaction: discord.Interaction):
     lines.append(f"- Channel ID: {ch_id}")
     lines.append(f"- Role ID: {role_id}")
     lines.append(f"- Setup Message ID: {msg_id}")
-    lines.append(f"- Debug Channel ID: {dbg_id}")
 
     recs = granted_history.get(guild_id_str, [])
     lines.append(f"\n**Recent Role Grants** (total {len(recs)})")
@@ -428,6 +408,14 @@ async def extractinfo_command(interaction: discord.Interaction):
     report = "\n".join(lines)
     await interaction.response.send_message(report, ephemeral=True)
 
-# --- Botの起動 ---
+# --- /reset_history コマンド (履歴のリセット) ---
+@bot.tree.command(name="reset_history", description="Reset the role-grant history (admin only).")
+@app_commands.default_permissions(administrator=True)
+async def reset_history_command(interaction: discord.Interaction):
+    guild_id_str = str(interaction.guild_id)
+    granted_history[guild_id_str] = []
+    save_granted_history_sheet()
+    await interaction.response.send_message("History has been reset for this server.", ephemeral=True)
+
 if __name__ == "__main__":
     bot.run(TOKEN)
