@@ -297,7 +297,6 @@ class HistoryPagerView(discord.ui.View):
         self.records = records
         self.page = 0
         self.per_page = 10
-        # ボタンはインスタンスごとに保持
         self.prev_button = PrevButton()
         self.next_button = NextButton()
         self.add_item(self.prev_button)
@@ -308,7 +307,6 @@ class HistoryPagerView(discord.ui.View):
         return ceil(len(self.records) / self.per_page) if self.records else 1
 
     def update_buttons(self):
-        # 件数が10件未満なら両ボタン無効
         if len(self.records) < self.per_page:
             self.prev_button.disabled = True
             self.next_button.disabled = True
@@ -320,9 +318,9 @@ class HistoryPagerView(discord.ui.View):
         start = self.page * self.per_page
         end = start + self.per_page
         chunk = self.records[start:end]
-        # 各行は番号とメンションのみ（uidの先頭アポストロフィを除去）
         lines = []
         for i, record in enumerate(chunk, start=1):
+            # UID の先頭に付いているアポストロフィを除去
             uid_clean = record["uid"].lstrip("'")
             lines.append(f"{start + i}. <@{uid_clean}>")
         description = ("This list shows the server's role assignment history.\n"
@@ -368,7 +366,6 @@ async def on_ready():
         logger.info("Slash commands synced.")
     except Exception as e:
         logger.error("Error syncing slash commands: %s", e)
-    # 永続的な View を登録（custom_id が変更されなければ、以前のメッセージも有効）
     bot.add_view(CheckEligibilityView())
 
 
@@ -460,7 +457,6 @@ async def reloadlist_command(interaction: discord.Interaction):
 @bot.tree.command(name="history", description="Show the role-grant history in pages of 10.")
 @app_commands.default_permissions(administrator=True)
 async def history_command(interaction: discord.Interaction):
-    # 常に最新の history をシートから再読み込み
     await data_manager.load_granted_history_sheet()
     guild_id_str = str(interaction.guild_id)
     records = data_manager.granted_history.get(guild_id_str, [])
@@ -476,7 +472,6 @@ async def history_command(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def extractinfo_command(interaction: discord.Interaction):
     guild_id_str = str(interaction.guild_id)
-    # 常に最新の history を読み込む
     await data_manager.load_granted_history_sheet()
     info = data_manager.guild_config.get(guild_id_str)
     if not info:
