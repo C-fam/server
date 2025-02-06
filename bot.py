@@ -55,6 +55,16 @@ except Exception as e:
     exit(1)
 
 
+# --- 補助関数 ---
+def format_time(iso_str: str) -> str:
+    """ISO8601文字列を 'YYYY-MM-DD HH:MM:SS' 形式に変換"""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return iso_str
+
+
 # --- DataManager クラス ---
 class DataManager:
     def __init__(self):
@@ -150,12 +160,11 @@ class DataManager:
         data = [headers]
         for gid, records in self.granted_history.items():
             for record in records:
-                row = [
-                    gid,
-                    record.get("uid", ""),
-                    record.get("username", ""),
-                    record.get("time", "")
-                ]
+                # uidを文字列として保存するため先頭にアポストロフィを付ける
+                uid_str = f"'{record.get('uid', '')}"
+                # timeは人間が読みやすい形式に変換
+                time_str = format_time(record.get("time", ""))
+                row = [gid, uid_str, record.get("username", ""), time_str]
                 data.append(row)
 
         def _update():
@@ -166,9 +175,12 @@ class DataManager:
 
     async def append_log_to_sheet(self, guild_id: str, uid: str, username: str, timestamp: str):
         ws = await self.get_sheet("Log")
+        # 書き込む際、uidに先頭アポストロフィを追加し、timeはフォーマット変換
+        uid_str = f"'{uid}"
+        time_str = format_time(timestamp)
         def _append():
             try:
-                ws.append_row([guild_id, uid, username, timestamp])
+                ws.append_row([guild_id, uid_str, username, time_str])
             except Exception as e:
                 logger.error("Failed to append log to sheet: %s", e)
         await asyncio.to_thread(_append)
@@ -285,21 +297,34 @@ class HistoryPagerView(discord.ui.View):
         self.records = records
         self.page = 0
         self.per_page = 10
-        self.add_item(PrevButton())
-        self.add_item(NextButton())
+        # ボタンはインスタンスごとに保持
+        self.prev_button = PrevButton()
+        self.next_button = NextButton()
+        self.add_item(self.prev_button)
+        self.add_item(self.next_button)
+        self.update_buttons()
 
     def max_page(self):
         return ceil(len(self.records) / self.per_page) if self.records else 1
 
+    def update_buttons(self):
+        # 件数が10件未満なら両ボタン無効
+        if len(self.records) < self.per_page:
+            self.prev_button.disabled = True
+            self.next_button.disabled = True
+        else:
+            self.prev_button.disabled = (self.page == 0)
+            self.next_button.disabled = (self.page >= self.max_page() - 1)
+
     def get_page_embed(self):
-        # ページごとに対象レコードを抽出
         start = self.page * self.per_page
         end = start + self.per_page
         chunk = self.records[start:end]
-        # 各行は番号とメンションのみ（例："1. <@UID>"）
+        # 各行は番号とメンションのみ（uidの先頭アポストロフィを除去）
         lines = []
         for i, record in enumerate(chunk, start=1):
-            lines.append(f"{start + i}. <@{record['uid']}>")
+            uid_clean = record["uid"].lstrip("'")
+            lines.append(f"{start + i}. <@{uid_clean}>")
         description = ("This list shows the server's role assignment history.\n"
                        "Below are the recent assignments:\n\n" +
                        "\n".join(lines) if lines else "No assignments on this page.")
@@ -316,7 +341,7 @@ class PrevButton(discord.ui.Button):
         view: HistoryPagerView = self.view  # type: ignore
         if view.page > 0:
             view.page -= 1
-        # 編集: 直接 edit_message を使って Embed を更新
+        view.update_buttons()
         await interaction.response.edit_message(embed=view.get_page_embed(), view=view)
 
 
@@ -328,6 +353,7 @@ class NextButton(discord.ui.Button):
         view: HistoryPagerView = self.view  # type: ignore
         if view.page < view.max_page() - 1:
             view.page += 1
+        view.update_buttons()
         await interaction.response.edit_message(embed=view.get_page_embed(), view=view)
 
 
@@ -471,7 +497,7 @@ async def extractinfo_command(interaction: discord.Interaction):
     ]
     recs = data_manager.granted_history.get(guild_id_str, [])
     for i, record in enumerate(recs[-10:], start=1):
-        lines.append(f"{i}. <@{record['uid']}>")
+        lines.append(f"{i}. <@{record['uid'].lstrip(\"'\")}>")
     report = "\n".join(lines)
     await interaction.response.send_message(report, ephemeral=True)
 
