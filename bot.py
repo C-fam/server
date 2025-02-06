@@ -241,7 +241,7 @@ class CheckEligibilityButton(discord.ui.Button):
             else:
                 return await interaction.followup.send("You already have this role.", ephemeral=True)
 
-        # ロール付与（優先度1）
+        # 優先度1: ロール付与
         try:
             await interaction.user.add_roles(role)
         except discord.Forbidden:
@@ -250,11 +250,11 @@ class CheckEligibilityButton(discord.ui.Button):
             else:
                 return await interaction.followup.send("Failed to grant role. Check bot permissions.", ephemeral=True)
 
-        # 優先度2：エフェメラルメッセージの送信（できるだけ早く応答）
+        # 優先度2: エフェメラル応答を即時送信
         response_text = f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!"
         await interaction.response.send_message(response_text, ephemeral=True)
 
-        # 優先度3：スプレッドシートへの書き込みはバックグラウンドで実行
+        # 優先度3: スプレッドシートへの書き込みはバックグラウンドで実行
         async def background_tasks():
             timestamp = datetime.utcnow().isoformat()
             log_entry = {
@@ -269,7 +269,6 @@ class CheckEligibilityButton(discord.ui.Button):
             except Exception as e:
                 logger.error("Background tasks error: %s", e)
 
-        # スプレッドシート処理はバックグラウンドで走らせる
         asyncio.create_task(background_tasks())
 
 
@@ -286,32 +285,27 @@ class HistoryPagerView(discord.ui.View):
         self.records = records
         self.page = 0
         self.per_page = 10
-        self.prev_button = PrevButton()
-        self.next_button = NextButton()
-        self.add_item(self.prev_button)
-        self.add_item(self.next_button)
-        self.update_buttons()
+        self.add_item(PrevButton())
+        self.add_item(NextButton())
 
     def max_page(self):
         return ceil(len(self.records) / self.per_page) if self.records else 1
 
-    def update_buttons(self):
-        self.prev_button.disabled = (self.page <= 0)
-        self.next_button.disabled = (self.page >= self.max_page() - 1)
-
-    def get_page_content(self):
+    def get_page_embed(self):
+        # ページごとに対象レコードを抽出
         start = self.page * self.per_page
         end = start + self.per_page
         chunk = self.records[start:end]
+        # 各行は番号とメンションのみ（例："1. <@UID>"）
         lines = []
         for i, record in enumerate(chunk, start=1):
-            idx = start + i
-            lines.append(f"[{idx}] UID: {record['uid']}, User: {record['username']}, Time: {record['time']}")
-        info = f"Page {self.page+1}/{self.max_page()} (Total {len(self.records)})"
-        if not lines:
-            lines.append("No data on this page.")
-        text = "\n".join(lines)
-        return f"**History**\n```\n{text}\n```\n{info}"
+            lines.append(f"{start + i}. <@{record['uid']}>")
+        description = ("This list shows the server's role assignment history.\n"
+                       "Below are the recent assignments:\n\n" +
+                       "\n".join(lines) if lines else "No assignments on this page.")
+        embed = discord.Embed(title="Role Assignment History", description=description, color=discord.Color.blue())
+        embed.set_footer(text=f"Page {self.page+1}/{self.max_page()} (Total {len(self.records)})")
+        return embed
 
 
 class PrevButton(discord.ui.Button):
@@ -322,9 +316,8 @@ class PrevButton(discord.ui.Button):
         view: HistoryPagerView = self.view  # type: ignore
         if view.page > 0:
             view.page -= 1
-        view.update_buttons()
-        await interaction.response.defer_update()
-        await interaction.edit_original_response(content=view.get_page_content(), view=view)
+        # 編集: 直接 edit_message を使って Embed を更新
+        await interaction.response.edit_message(embed=view.get_page_embed(), view=view)
 
 
 class NextButton(discord.ui.Button):
@@ -335,9 +328,7 @@ class NextButton(discord.ui.Button):
         view: HistoryPagerView = self.view  # type: ignore
         if view.page < view.max_page() - 1:
             view.page += 1
-        view.update_buttons()
-        await interaction.response.defer_update()
-        await interaction.edit_original_response(content=view.get_page_content(), view=view)
+        await interaction.response.edit_message(embed=view.get_page_embed(), view=view)
 
 
 # --- Bot イベント ---
@@ -450,7 +441,8 @@ async def history_command(interaction: discord.Interaction):
     if not records:
         return await interaction.response.send_message("No history for this server.", ephemeral=True)
     view = HistoryPagerView(records)
-    await interaction.response.send_message(view.get_page_content(), view=view, ephemeral=True)
+    embed = view.get_page_embed()
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # --- /extractinfo コマンド ---
@@ -479,8 +471,7 @@ async def extractinfo_command(interaction: discord.Interaction):
     ]
     recs = data_manager.granted_history.get(guild_id_str, [])
     for i, record in enumerate(recs[-10:], start=1):
-        lines.append(f"{i}. UID: {record['uid']}, Name: {record['username']}, Time: {record['time']}")
-
+        lines.append(f"{i}. <@{record['uid']}>")
     report = "\n".join(lines)
     await interaction.response.send_message(report, ephemeral=True)
 
