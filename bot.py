@@ -173,15 +173,13 @@ class CheckEligibilityButton(discord.ui.Button):
 
         if user_id_str not in valid_uids:
             return await interaction.response.send_message(
-                f"You are not eligible (UID: {user_id_str}).",
-                ephemeral=True
+                f"You are not eligible (UID: {user_id_str}).", ephemeral=True
             )
 
         info = guild_config.get(guild_id_str)
         if not info:
             return await interaction.response.send_message(
-                "No setup found. Please run /setup.",
-                ephemeral=True
+                "No setup found. Please run /setup.", ephemeral=True
             )
 
         role = interaction.guild.get_role(info["role_id"])
@@ -293,7 +291,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         ephemeral=True
     )
 
-# --- /setup コマンド (debugチャンネル削除、投稿チャンネルと付与するロールのみ) ---
+# --- /setup コマンド (投稿チャンネルと付与するロールのみ) ---
 @bot.tree.command(name="setup", description="Set up or update the eligibility button and assigned role.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
@@ -370,8 +368,7 @@ async def reloadlist_command(interaction: discord.Interaction):
 @bot.tree.command(name="history", description="Show the role-grant history in pages of 10.")
 @app_commands.default_permissions(administrator=True)
 async def history_command(interaction: discord.Interaction):
-    # 最新のデータをシートから再読み込み
-    load_granted_history_sheet()
+    load_granted_history_sheet()  # 最新データを再読み込み
     guild_id_str = str(interaction.guild_id)
     records = granted_history.get(guild_id_str, [])
     if not records:
