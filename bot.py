@@ -203,33 +203,51 @@ class CheckEligibilityButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # ※ defer は行わず、直接応答することでエフェメラルメッセージが送信される
         guild_id_str = str(interaction.guild_id)
         user_id_str = str(interaction.user.id)
 
         # UID チェック
         if user_id_str not in data_manager.valid_uids:
-            return await interaction.response.send_message(
-                f"You are not eligible (UID: {user_id_str}).", ephemeral=True
-            )
+            if not interaction.response.is_done():
+                return await interaction.response.send_message(
+                    f"You are not eligible (UID: {user_id_str}).", ephemeral=True
+                )
+            else:
+                return await interaction.followup.send(
+                    f"You are not eligible (UID: {user_id_str}).", ephemeral=True
+                )
 
         info = data_manager.guild_config.get(guild_id_str)
         if not info:
-            return await interaction.response.send_message(
-                "No setup found. Please run /setup.", ephemeral=True
-            )
+            if not interaction.response.is_done():
+                return await interaction.response.send_message(
+                    "No setup found. Please run /setup.", ephemeral=True
+                )
+            else:
+                return await interaction.followup.send(
+                    "No setup found. Please run /setup.", ephemeral=True
+                )
 
         role = interaction.guild.get_role(info["role_id"])
         if not role:
-            return await interaction.response.send_message("Configured role not found.", ephemeral=True)
+            if not interaction.response.is_done():
+                return await interaction.response.send_message("Configured role not found.", ephemeral=True)
+            else:
+                return await interaction.followup.send("Configured role not found.", ephemeral=True)
 
         if role in interaction.user.roles:
-            return await interaction.response.send_message("You already have this role.", ephemeral=True)
+            if not interaction.response.is_done():
+                return await interaction.response.send_message("You already have this role.", ephemeral=True)
+            else:
+                return await interaction.followup.send("You already have this role.", ephemeral=True)
 
         try:
             await interaction.user.add_roles(role)
         except discord.Forbidden:
-            return await interaction.response.send_message("Failed to grant role. Check bot permissions.", ephemeral=True)
+            if not interaction.response.is_done():
+                return await interaction.response.send_message("Failed to grant role. Check bot permissions.", ephemeral=True)
+            else:
+                return await interaction.followup.send("Failed to grant role. Check bot permissions.", ephemeral=True)
 
         timestamp = datetime.utcnow().isoformat()
         log_entry = {
@@ -241,10 +259,11 @@ class CheckEligibilityButton(discord.ui.Button):
         await data_manager.save_granted_history_sheet()
         await data_manager.append_log_to_sheet(guild_id_str, user_id_str, str(interaction.user), timestamp)
 
-        await interaction.response.send_message(
-            f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!",
-            ephemeral=True
-        )
+        response_text = f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!"
+        if not interaction.response.is_done():
+            await interaction.response.send_message(response_text, ephemeral=True)
+        else:
+            await interaction.followup.send(response_text, ephemeral=True)
 
 
 class CheckEligibilityView(discord.ui.View):
@@ -335,10 +354,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     if interaction.response.is_done():
         await interaction.followup.send("An error occurred. Please try again or contact an admin.", ephemeral=True)
     else:
-        await interaction.response.send_message(
-            "An error occurred. Please try again or contact an admin.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("An error occurred. Please try again or contact an admin.", ephemeral=True)
 
 
 # --- /setup コマンド ---
