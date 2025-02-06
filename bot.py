@@ -241,6 +241,7 @@ class CheckEligibilityButton(discord.ui.Button):
             else:
                 return await interaction.followup.send("You already have this role.", ephemeral=True)
 
+        # ロール付与（優先度1）
         try:
             await interaction.user.add_roles(role)
         except discord.Forbidden:
@@ -249,21 +250,27 @@ class CheckEligibilityButton(discord.ui.Button):
             else:
                 return await interaction.followup.send("Failed to grant role. Check bot permissions.", ephemeral=True)
 
-        timestamp = datetime.utcnow().isoformat()
-        log_entry = {
-            "uid": user_id_str,
-            "username": str(interaction.user),
-            "time": timestamp
-        }
-        data_manager.granted_history.setdefault(guild_id_str, []).append(log_entry)
-        await data_manager.save_granted_history_sheet()
-        await data_manager.append_log_to_sheet(guild_id_str, user_id_str, str(interaction.user), timestamp)
-
+        # 優先度2：エフェメラルメッセージの送信（できるだけ早く応答）
         response_text = f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!"
-        if not interaction.response.is_done():
-            await interaction.response.send_message(response_text, ephemeral=True)
-        else:
-            await interaction.followup.send(response_text, ephemeral=True)
+        await interaction.response.send_message(response_text, ephemeral=True)
+
+        # 優先度3：スプレッドシートへの書き込みはバックグラウンドで実行
+        async def background_tasks():
+            timestamp = datetime.utcnow().isoformat()
+            log_entry = {
+                "uid": user_id_str,
+                "username": str(interaction.user),
+                "time": timestamp
+            }
+            data_manager.granted_history.setdefault(guild_id_str, []).append(log_entry)
+            try:
+                await data_manager.save_granted_history_sheet()
+                await data_manager.append_log_to_sheet(guild_id_str, user_id_str, str(interaction.user), timestamp)
+            except Exception as e:
+                logger.error("Background tasks error: %s", e)
+
+        # スプレッドシート処理はバックグラウンドで走らせる
+        asyncio.create_task(background_tasks())
 
 
 class CheckEligibilityView(discord.ui.View):
