@@ -247,11 +247,18 @@ class CheckEligibilityButton(discord.ui.Button):
             else:
                 return await interaction.followup.send("Configured role not found.", ephemeral=True)
 
+        # すでにロールがある場合
         if role in interaction.user.roles:
             if not interaction.response.is_done():
-                return await interaction.response.send_message("You already have this role.", ephemeral=True)
+                return await interaction.response.send_message(
+                    f"You already have {role.mention}.",
+                    ephemeral=True
+                )
             else:
-                return await interaction.followup.send("You already have this role.", ephemeral=True)
+                return await interaction.followup.send(
+                    f"You already have {role.mention}.",
+                    ephemeral=True
+                )
 
         # 優先度1: ロール付与
         try:
