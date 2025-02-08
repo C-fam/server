@@ -65,6 +65,10 @@ def format_time(iso_str: str) -> str:
         return iso_str
 
 
+# 定数：Embed の色（#836EF9）
+EMBED_COLOR = int("836EF9", 16)
+
+
 # --- DataManager クラス ---
 class DataManager:
     def __init__(self):
@@ -160,9 +164,12 @@ class DataManager:
         data = [headers]
         for gid, records in self.granted_history.items():
             for record in records:
-                # uidは文字列として保存するため先頭にアポストロフィを付ける
-                uid_str = f"'{record.get('uid', '')}"
-                # timeは読みやすい形式に変換
+                raw_uid = record.get("uid", "")
+                # UID の先頭にシングルクォートがなければ追加する
+                if not raw_uid.startswith("'"):
+                    uid_str = f"'{raw_uid}"
+                else:
+                    uid_str = raw_uid
                 time_str = format_time(record.get("time", ""))
                 row = [gid, uid_str, record.get("username", ""), time_str]
                 data.append(row)
@@ -175,8 +182,11 @@ class DataManager:
 
     async def append_log_to_sheet(self, guild_id: str, uid: str, username: str, timestamp: str):
         ws = await self.get_sheet("Log")
-        # 書き込む際、uidに先頭アポストロフィを追加し、timeはフォーマット変換
-        uid_str = f"'{uid}"
+        # UID の先頭にシングルクォートがなければ追加する
+        if not uid.startswith("'"):
+            uid_str = f"'{uid}"
+        else:
+            uid_str = uid
         time_str = format_time(timestamp)
         def _append():
             try:
@@ -195,7 +205,6 @@ class DataManager:
         await self.save_granted_history_sheet()
 
 
-# グローバルなデータマネージャーインスタンス
 data_manager = DataManager()
 
 # --- Discord Bot の初期化 ---
@@ -211,7 +220,7 @@ class CheckEligibilityButton(discord.ui.Button):
         super().__init__(
             custom_id="check_eligibility_button",  # 永続性のため custom_id は変更しない
             label="Check Eligibility",
-            style=discord.ButtonStyle.primary
+            style=discord.ButtonStyle.primary  # 希望のボタン色は公式には指定できないので primary を使用
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -220,60 +229,37 @@ class CheckEligibilityButton(discord.ui.Button):
 
         # UID チェック
         if user_id_str not in data_manager.valid_uids:
-            if not interaction.response.is_done():
-                return await interaction.response.send_message(
-                    f"You are not eligible (UID: {user_id_str}).", ephemeral=True
-                )
-            else:
-                return await interaction.followup.send(
-                    f"You are not eligible (UID: {user_id_str}).", ephemeral=True
-                )
+            return await interaction.response.send_message(
+                f"You are not eligible (UID: {user_id_str}).", ephemeral=True
+            )
 
         info = data_manager.guild_config.get(guild_id_str)
         if not info:
-            if not interaction.response.is_done():
-                return await interaction.response.send_message(
-                    "No setup found. Please run /setup.", ephemeral=True
-                )
-            else:
-                return await interaction.followup.send(
-                    "No setup found. Please run /setup.", ephemeral=True
-                )
+            return await interaction.response.send_message(
+                "No setup found. Please run /setup.", ephemeral=True
+            )
 
         role = interaction.guild.get_role(info["role_id"])
         if not role:
-            if not interaction.response.is_done():
-                return await interaction.response.send_message("Configured role not found.", ephemeral=True)
-            else:
-                return await interaction.followup.send("Configured role not found.", ephemeral=True)
+            return await interaction.response.send_message(
+                "Configured role not found.", ephemeral=True
+            )
 
-        # すでにロールがある場合
         if role in interaction.user.roles:
-            if not interaction.response.is_done():
-                return await interaction.response.send_message(
-                    f"You already have {role.mention}.",
-                    ephemeral=True
-                )
-            else:
-                return await interaction.followup.send(
-                    f"You already have {role.mention}.",
-                    ephemeral=True
-                )
+            return await interaction.response.send_message(
+                f"You already have {role.mention}.", ephemeral=True
+            )
 
-        # 優先度1: ロール付与
         try:
             await interaction.user.add_roles(role)
         except discord.Forbidden:
-            if not interaction.response.is_done():
-                return await interaction.response.send_message("Failed to grant role. Check bot permissions.", ephemeral=True)
-            else:
-                return await interaction.followup.send("Failed to grant role. Check bot permissions.", ephemeral=True)
+            return await interaction.response.send_message(
+                "Failed to grant role. Check bot permissions.", ephemeral=True
+            )
 
-        # 優先度2: エフェメラル応答を即時送信
         response_text = f"You are **eligible** (UID: {user_id_str}). Role {role.mention} has been granted!"
         await interaction.response.send_message(response_text, ephemeral=True)
 
-        # 優先度3: スプレッドシートへの書き込みはバックグラウンドで実行
         async def background_tasks():
             timestamp = datetime.utcnow().isoformat()
             log_entry = {
@@ -333,7 +319,7 @@ class HistoryPagerView(discord.ui.View):
         description = ("This list shows the server's role assignment history.\n"
                        "Below are the recent assignments:\n\n" +
                        "\n".join(lines) if lines else "No assignments on this page.")
-        embed = discord.Embed(title="Role Assignment History", description=description, color=discord.Color.blue())
+        embed = discord.Embed(title="Role Assignment History", description=description, color=EMBED_COLOR)
         embed.set_footer(text=f"Page {self.page+1}/{self.max_page()} (Total {len(self.records)})")
         return embed
 
@@ -392,11 +378,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     channel="Channel for the check button",
     role="Role to grant if eligible"
 )
-async def setup_command(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel,
-    role: discord.Role
-):
+async def setup_command(interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role):
     guild_id_str = str(interaction.guild_id)
     old_info = data_manager.guild_config.get(guild_id_str, {})
     old_msg_id = old_info.get("message_id")
@@ -408,11 +390,7 @@ async def setup_command(
         if old_ch:
             try:
                 old_msg = await old_ch.fetch_message(old_msg_id)
-                embed = discord.Embed(
-                    title="Check Eligibility",
-                    description=embed_text,
-                    color=discord.Color.blue()
-                )
+                embed = discord.Embed(title="Check Eligibility", description=embed_text, color=EMBED_COLOR)
                 view = CheckEligibilityView()
                 await old_msg.edit(embed=embed, view=view)
                 data_manager.guild_config[guild_id_str] = {
@@ -429,11 +407,7 @@ async def setup_command(
             except Exception as e:
                 logger.error("Error editing old message: %s", e)
 
-    embed = discord.Embed(
-        title="Check Eligibility",
-        description=embed_text,
-        color=discord.Color.blue()
-    )
+    embed = discord.Embed(title="Check Eligibility", description=embed_text, color=EMBED_COLOR)
     view = CheckEligibilityView()
     new_msg = await channel.send(embed=embed, view=view)
     data_manager.guild_config[guild_id_str] = {
