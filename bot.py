@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 # --- 環境変数の読み込み ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
+
+# 変更前の CSV ファイル名（今回の修正では使いませんが、他の箇所に影響がないよう残しています）
 CSV_FILE_NAME = "output.csv"
 
 if TOKEN is None:
@@ -72,7 +74,7 @@ EMBED_COLOR = int("836EF9", 16)
 # --- DataManager クラス ---
 class DataManager:
     def __init__(self):
-        self.valid_uids = set()   # CSVから読み込む UID 一覧
+        self.valid_uids = set()   # listシートから読み込む UID 一覧
         self.guild_config = {}    # {guild_id: {"server_name", "channel_id", "role_id", "message_id"}}
         self.granted_history = {} # {guild_id: [ {"uid", "username", "time"}, ... ]}
 
@@ -85,17 +87,27 @@ class DataManager:
         return await asyncio.to_thread(_get_sheet)
 
     async def load_uid_list(self) -> int:
+        """
+        output.csv ではなく、keone_list_log の "list" シートの A列(Discord), B列(DCUID) から UID を読み込み、
+        self.valid_uids を更新する。
+        """
         new_uids = set()
-        try:
-            with open(CSV_FILE_NAME, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    uid = row.get("DCUID")
+
+        def _load_from_list_sheet():
+            try:
+                ws = SPREADSHEET.worksheet("list")
+                records = ws.get_all_records()
+                for row in records:
+                    # シートのカラム名が「Discord」「DCUID」想定
+                    uid = str(row.get("DCUID", "")).strip()
                     if uid:
                         new_uids.add(uid)
-            logger.info("Loaded %d UIDs from CSV.", len(new_uids))
-        except FileNotFoundError:
-            logger.warning("%s not found.", CSV_FILE_NAME)
+                logger.info("Loaded %d UIDs from 'list' sheet.", len(new_uids))
+            except Exception as e:
+                logger.warning("Error loading 'list' sheet: %s", e)
+            return new_uids
+
+        new_uids = await asyncio.to_thread(_load_from_list_sheet)
         self.valid_uids = new_uids
         return len(self.valid_uids)
 
@@ -188,11 +200,13 @@ class DataManager:
         else:
             uid_str = uid
         time_str = format_time(timestamp)
+
         def _append():
             try:
                 ws.append_row([guild_id, uid_str, username, time_str])
             except Exception as e:
                 logger.error("Failed to append log to sheet: %s", e)
+
         await asyncio.to_thread(_append)
 
     async def load_all_data(self):
@@ -220,7 +234,7 @@ class CheckEligibilityButton(discord.ui.Button):
         super().__init__(
             custom_id="check_eligibility_button",  # 永続性のため custom_id は変更しない
             label="Check Eligibility",
-            style=discord.ButtonStyle.primary  # 希望のボタン色は公式には指定できないので primary を使用
+            style=discord.ButtonStyle.primary
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -424,12 +438,12 @@ async def setup_command(interaction: discord.Interaction, channel: discord.TextC
 
 
 # --- /reloadlist コマンド ---
-@bot.tree.command(name="reloadlist", description="Reload the user list from CSV.")
+@bot.tree.command(name="reloadlist", description="Reload the user list from Google Sheets (list sheet).")
 @app_commands.default_permissions(administrator=True)
 async def reloadlist_command(interaction: discord.Interaction):
     count = await data_manager.load_uid_list()
     await interaction.response.send_message(
-        f"Reloaded user list. {count} UIDs found.",
+        f"Reloaded user list from 'list' sheet. {count} UIDs found.",
         ephemeral=True
     )
 
