@@ -1,5 +1,7 @@
 # eligibility_bot.py
 # Python 3.11+ / discord.py 2.4.1‑post
+# 必要環境変数: BOT_TOKEN  /  GOOGLE_CREDENTIALS(JSON文字列)
+# 省略可        : SPREADSHEET_NAME（既定 "keone_list_log")
 
 import os, json, asyncio, logging
 from datetime import datetime
@@ -24,21 +26,22 @@ logging.basicConfig(
 log = logging.getLogger("elig‑bot")
 
 
-# ────────── 環境変数 / Sheets ──────────
+# ────────── 環境変数 / Google Sheets ──────────
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-GCREDS = os.getenv("GOOGLE_CREDENTIALS")
+GCREDS = os.getenv("GOOGLE_CREDENTIALS")           # JSON 文字列
 SHEET_NAME = os.getenv("SPREADSHEET_NAME", "keone_list_log")
 if not TOKEN or not GCREDS:
     raise SystemExit("BOT_TOKEN / GOOGLE_CREDENTIALS が未設定")
 
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GCREDS), SCOPE)
-gclient = gspread.authorize(creds)
+SCOPE = ["https://spreadsheets.google.com/feeds",
+         "https://www.googleapis.com/auth/drive"]
+creds      = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(GCREDS), SCOPE)
+gclient    = gspread.authorize(creds)
 SPREADSHEET = gclient.open(SHEET_NAME)
 
-gs_lock = asyncio.Lock()
-EMBED_COLOR = int("836EF9", 16)
+gs_lock     = asyncio.Lock()          # Sheet 操作用排他ロック
+EMBED_COLOR = int("836EF9", 16)       # #836EF9
 
 
 # ────────── Utility ──────────
@@ -46,21 +49,23 @@ def now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
-def iso2human(s: str) -> str:
+def iso2human(iso: str) -> str:
     try:
-        return datetime.fromisoformat(s).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
-        return s
+        return iso
 
 
 # ────────── DataManager ──────────
 class DataManager:
-    def __init__(self):
-        self.uids: set[str] = set()
-        self.cfg: Dict[str, Dict[str, int | str]] = {}
-        self.hist: Dict[str, List[Dict[str, str]]] = {}
+    """UID・設定・付与履歴を一元管理"""
 
-    # ID helpers
+    def __init__(self):
+        self.uids:  set[str] = set()
+        self.cfg:   Dict[str, Dict[str, int | str]] = {}
+        self.hist:  Dict[str, List[Dict[str, str]]] = {}
+
+    # ---- ID 変換 ----
     @staticmethod
     def _to_sheet(v: int | str) -> str:
         s = str(v)
@@ -70,7 +75,7 @@ class DataManager:
     def _from_sheet(v: str | int) -> int:
         return int(str(v).lstrip("'"))
 
-    # Google Sheets helper
+    # ---- Sheet helper ----
     async def _sheet(self, name: str, rows="1000", cols="10"):
         async with gs_lock:
             try:
@@ -78,32 +83,30 @@ class DataManager:
             except gspread.WorksheetNotFound:
                 return SPREADSHEET.add_worksheet(title=name, rows=rows, cols=cols)
 
-    # UID list
+    # ---- UID list ----
     async def load_uids(self) -> int:
         async with gs_lock:
             recs = (await self._sheet("list")).get_all_records()
-        self.uids = {
-            str(r.get("DCUID", "")).strip() for r in recs if r.get("DCUID")
-        }
+        self.uids = {str(r.get("DCUID", "")).strip() for r in recs if r.get("DCUID")}
         log.info("UIDs loaded: %d", len(self.uids))
         return len(self.uids)
 
-    # guild_config
+    # ---- guild_config ----
     async def load_cfg(self):
         async with gs_lock:
             recs = (await self._sheet("guild_config")).get_all_records()
         self.cfg = {
             str(r["guild_id"]): {
                 "server_name": r.get("server_name", ""),
-                "channel_id": self._from_sheet(r.get("channel_id", 0)),
-                "role_id":    self._from_sheet(r.get("role_id",    0)),
-                "message_id": self._from_sheet(r.get("message_id", 0)),
+                "channel_id":  self._from_sheet(r.get("channel_id", 0)),
+                "role_id":     self._from_sheet(r.get("role_id",    0)),
+                "message_id":  self._from_sheet(r.get("message_id", 0)),
             }
             for r in recs if r.get("guild_id")
         }
 
     async def save_cfg(self):
-        hdr = ["guild_id", "server_name", "channel_id", "role_id", "message_id"]
+        hdr  = ["guild_id", "server_name", "channel_id", "role_id", "message_id"]
         rows = [hdr] + [
             [
                 gid,
@@ -120,7 +123,7 @@ class DataManager:
             ws.update("A1", rows)
         log.info("guild_config saved")
 
-    # history
+    # ---- history ----
     async def load_hist(self):
         async with gs_lock:
             recs = (await self._sheet("granted_history")).get_all_records()
@@ -130,40 +133,38 @@ class DataManager:
             if gid:
                 self.hist.setdefault(gid, []).append(
                     {
-                        "uid": r["uid"],
+                        "uid":      r["uid"],
                         "username": r.get("username", ""),
-                        "time": r.get("time", ""),
+                        "time":     r.get("time", ""),
                     }
                 )
 
     async def save_hist(self):
-        hdr = ["guild_id", "uid", "username", "time"]
+        hdr  = ["guild_id", "uid", "username", "time"]
         rows = [hdr]
         for gid, lst in self.hist.items():
             for rec in lst:
-                rows.append(
-                    [
-                        gid,
-                        self._to_sheet(rec["uid"]),
-                        rec["username"],
-                        iso2human(rec["time"]),
-                    ]
-                )
+                rows.append([
+                    gid,
+                    self._to_sheet(rec["uid"]),
+                    rec["username"],
+                    iso2human(rec["time"]),
+                ])
         async with gs_lock:
             ws = await self._sheet("granted_history", rows="1000", cols="10")
             ws.clear()
             ws.update("A1", rows)
         log.info("history saved")
 
-    # public
+    # ---- public ----
     async def startup(self):
         await self.load_uids()
         await self.load_cfg()
         await self.load_hist()
 
-    async def add_hist(self, gid: str, uid: str, username: str):
+    async def add_hist(self, gid: str, uid: str, user: str):
         self.hist.setdefault(gid, []).append(
-            {"uid": uid, "username": username, "time": now_iso()}
+            {"uid": uid, "username": user, "time": now_iso()}
         )
         await self.save_hist()
 
@@ -172,14 +173,14 @@ dm = DataManager()
 
 
 # ────────── Discord Bot ──────────
-intents = discord.Intents.default()
-intents.members = True
+intents                 = discord.Intents.default()
+intents.members         = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot  = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 
-# ---------- Buttons & Views ----------
+# ---- Buttons & Views ----
 class CheckButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
@@ -204,7 +205,7 @@ class CheckButton(discord.ui.Button):
             )
 
         role = itx.guild.get_role(cfg["role_id"])
-        if not role:
+        if role is None:
             return await itx.response.send_message(
                 "Configured role not found.", ephemeral=True
             )
@@ -241,19 +242,17 @@ class Pager(discord.ui.View):
         self.next = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary)
         self.prev.callback = self.prev_page
         self.next.callback = self.next_page
-        self.add_item(self.prev)
-        self.add_item(self.next)
+        self.add_item(self.prev); self.add_item(self.next)
         self._update()
 
-    # helpers
-    def _max(self):
+    def _max(self) -> int:
         return max(1, ceil(len(self.recs) / self.per))
 
-    def _embed(self):
+    def _embed(self) -> discord.Embed:
         start = self.page * self.per
-        chunk = self.recs[start : start + self.per]
+        chunk = self.recs[start: start + self.per]
 
-        lines = []
+        lines: List[str] = []
         for i, rec in enumerate(chunk, start=1):
             uid_clean = rec["uid"].lstrip("'")
             lines.append(f"{start + i}. <@{uid_clean}>")
@@ -265,15 +264,16 @@ class Pager(discord.ui.View):
             else "No assignments on this page."
         )
 
-        em = discord.Embed(title="Role Assignment History", description=desc, color=EMBED_COLOR)
-        em.set_footer(text=f"Page {self.page + 1}/{self._max()} (Total {len(self.recs)})")
+        em = discord.Embed(title="Role Assignment History",
+                           description=desc, color=EMBED_COLOR)
+        em.set_footer(text=f"Page {self.page + 1}/{self._max()} "
+                           f"(Total {len(self.recs)})")
         return em
 
     def _update(self):
         self.prev.disabled = self.page == 0
         self.next.disabled = self.page >= self._max() - 1
 
-    # callbacks
     async def prev_page(self, itx: discord.Interaction):
         if self.page:
             self.page -= 1
@@ -287,30 +287,35 @@ class Pager(discord.ui.View):
         await itx.response.edit_message(embed=self._embed(), view=self)
 
 
-# ────────── Events ──────────
+# ---- Events ----
 @bot.event
 async def on_ready():
     log.info("Logged in as %s (%s)", bot.user, bot.user.id)
     await dm.startup()
-    bot.add_view(CheckView())  # 永続 View
+    bot.add_view(CheckView())    # ボタンの永続化
     await tree.sync()
     log.info("Slash‑commands synced")
 
+    # バックアップタスクを起動（イベントループが存在するタイミングで）
+    if not auto_backup.is_running():
+        auto_backup.start()
 
-# ────────── Slash Commands ──────────
+
+# ---- Slash Commands ----
 @tree.command(name="setup", description="Set up / update eligibility button & role")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel for the button", role="Role to grant")
+@app_commands.describe(channel="Channel for the button",
+                       role="Role to grant")
 async def setup_cmd(
     itx: discord.Interaction,
     channel: discord.TextChannel,
     role: discord.Role,
 ):
-    gid = str(itx.guild_id)
-    cfg = dm.cfg.get(gid, {})
+    gid      = str(itx.guild_id)
+    cfg      = dm.cfg.get(gid, {})
     embed_txt = "Click the button below to see if you're on the list."
 
-    # 旧メッセージがあれば更新
+    # 既存メッセージを更新
     if cfg.get("message_id") and cfg.get("channel_id"):
         ch = itx.guild.get_channel(cfg["channel_id"])
         if isinstance(ch, discord.TextChannel):
@@ -318,7 +323,9 @@ async def setup_cmd(
                 msg = await ch.fetch_message(cfg["message_id"])
                 await msg.edit(
                     embed=discord.Embed(
-                        title="Check Eligibility", description=embed_txt, color=EMBED_COLOR
+                        title="Check Eligibility",
+                        description=embed_txt,
+                        color=EMBED_COLOR,
                     ),
                     view=CheckView(),
                 )
@@ -333,15 +340,20 @@ async def setup_cmd(
                 dm.cfg[gid] = cfg
                 await dm.save_cfg()
                 return await itx.response.send_message(
-                    f"Button updated in {ch.mention}. Role set to {role.mention}.",
+                    f"Button updated in {ch.mention}. "
+                    f"Role set to {role.mention}.",
                     ephemeral=True,
                 )
             except discord.NotFound:
-                pass  # fall through to create new
+                pass   # 新規作成へフォールスルー
 
     # 新規作成
     msg = await channel.send(
-        embed=discord.Embed(title="Check Eligibility", description=embed_txt, color=EMBED_COLOR),
+        embed=discord.Embed(
+            title="Check Eligibility",
+            description=embed_txt,
+            color=EMBED_COLOR,
+        ),
         view=CheckView(),
     )
     dm.cfg[gid] = {
@@ -352,7 +364,8 @@ async def setup_cmd(
     }
     await dm.save_cfg()
     await itx.response.send_message(
-        f"Setup complete in {channel.mention} with role {role.mention}.", ephemeral=True
+        f"Setup complete in {channel.mention} with role {role.mention}.",
+        ephemeral=True,
     )
 
 
@@ -360,19 +373,25 @@ async def setup_cmd(
 @app_commands.default_permissions(administrator=True)
 async def reloadlist(itx: discord.Interaction):
     n = await dm.load_uids()
-    await itx.response.send_message(f"UID list reloaded: **{n}** entries.", ephemeral=True)
+    await itx.response.send_message(
+        f"UID list reloaded: **{n}** entries.", ephemeral=True
+    )
 
 
 @tree.command(name="history", description="Show role‑grant history")
 @app_commands.default_permissions(administrator=True)
 async def history(itx: discord.Interaction):
     await dm.load_hist()
-    gid = str(itx.guild_id)
-    recs = dm.hist.get(gid, [])
+    gid   = str(itx.guild_id)
+    recs  = dm.hist.get(gid, [])
     if not recs:
-        return await itx.response.send_message("No history for this server.", ephemeral=True)
+        return await itx.response.send_message(
+            "No history for this server.", ephemeral=True
+        )
     pager = Pager(recs)
-    await itx.response.send_message(embed=pager._embed(), view=pager, ephemeral=True)
+    await itx.response.send_message(
+        embed=pager._embed(), view=pager, ephemeral=True
+    )
 
 
 @tree.command(name="extractinfo", description="Extract server info & last 10 grants")
@@ -381,7 +400,9 @@ async def extractinfo(itx: discord.Interaction):
     gid = str(itx.guild_id)
     cfg = dm.cfg.get(gid)
     if not cfg:
-        return await itx.response.send_message("No setup info found.", ephemeral=True)
+        return await itx.response.send_message(
+            "No setup info found.", ephemeral=True
+        )
 
     await dm.load_hist()
     recs = dm.hist.get(gid, [])
@@ -395,7 +416,6 @@ async def extractinfo(itx: discord.Interaction):
         "",
         f"**Recent Role Grants** (total {len(recs)})",
     ]
-
     for i, rec in enumerate(recs[-10:], start=1):
         uid_clean = rec["uid"].lstrip("'")
         lines.append(f"{i}. <@{uid_clean}>")
@@ -409,10 +429,12 @@ async def reset_history(itx: discord.Interaction):
     gid = str(itx.guild_id)
     dm.hist[gid] = []
     await dm.save_hist()
-    await itx.response.send_message("History reset for this server.", ephemeral=True)
+    await itx.response.send_message(
+        "History reset for this server.", ephemeral=True
+    )
 
 
-# ────────── Auto backup ──────────
+# ---- Auto backup task ----
 @tasks.loop(minutes=30)
 async def auto_backup():
     await dm.save_cfg()
@@ -420,7 +442,6 @@ async def auto_backup():
     log.info("Auto‑backup done")
 
 
-# ────────── main ──────────
+# ---- main ----
 if __name__ == "__main__":
-    auto_backup.start()
     bot.run(TOKEN)
